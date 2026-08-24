@@ -31,6 +31,9 @@ enum BottomTab {
 #[derive(Clone, Copy, PartialEq)]
 enum CenterTab {
     Code,
+    /// Disassembly graph: CFG of the selected function (IF/branches).
+    DGraph,
+    /// Whole-image call graph.
     Graph,
 }
 
@@ -106,6 +109,8 @@ struct Sink<'a> {
     xref_fn: &'a mut Option<usize>,
     /// Insn to flash-highlight after scrolling (goto / C-line click).
     flash: &'a mut Option<usize>,
+    /// Label insn clicked in Identity C: scroll C pane to `L<n>:` + flash.
+    c_goto: &'a mut Option<usize>,
 }
 
 pub struct App {
@@ -146,6 +151,9 @@ pub struct App {
     c_hover_range: Option<(usize, usize)>,
     /// Recently jumped-to insn: flash-highlight with fade-out.
     flash: Option<(usize, std::time::Instant)>,
+    /// Identity C pane: scroll to this line + flash it (goto navigation).
+    c_scroll_line: Option<usize>,
+    c_flash: Option<(usize, std::time::Instant)>,
     /// Measured world-space widths of call-graph nodes (content-sized).
     img_w: HashMap<usize, f32>,
     img_colw: Vec<f32>,
@@ -194,6 +202,8 @@ impl App {
             hover_fn: None,
             c_hover_range: None,
             flash: None,
+            c_scroll_line: None,
+            c_flash: None,
             img_w: HashMap::new(),
             img_colw: Vec::new(),
             hist: Vec::new(),
@@ -557,6 +567,10 @@ impl App {
                         ui.close_menu();
                         self.center = CenterTab::Graph;
                         self.graph_mode = GraphMode::Image;
+                    }
+                    if ui.button("DGraph view (disasm graph)").clicked() {
+                        ui.close_menu();
+                        self.center = CenterTab::DGraph;
                     }
                     if ui.button("Graph: CFG of selected").clicked() {
                         ui.close_menu();
@@ -998,6 +1012,13 @@ impl App {
                     self.center = CenterTab::Code;
                 }
                 if ui
+                    .selectable_label(self.center == CenterTab::DGraph, "DGraph")
+                    .on_hover_text("Disassembly graph: CFG with IF/branch edges")
+                    .clicked()
+                {
+                    self.center = CenterTab::DGraph;
+                }
+                if ui
                     .selectable_label(self.center == CenterTab::Graph, "Graph")
                     .clicked()
                 {
@@ -1077,7 +1098,7 @@ impl App {
             };
             let fn_ranges = &l.fn_ranges;
             let cfg_res = match (self.center, self.graph_mode) {
-                (CenterTab::Graph, GraphMode::Cfg) => Some(l.cfg(sel)),
+                (CenterTab::Graph, GraphMode::Cfg) | (CenterTab::DGraph, _) => Some(l.cfg(sel)),
                 _ => None,
             };
 
@@ -1089,9 +1110,12 @@ impl App {
             let hover_fn_prev = self.hover_fn;
             let c_range_prev = self.c_hover_range;
             let flash_prev = self.flash;
+            let c_flash_prev = self.c_flash;
+            let c_scroll_line: Option<usize> = self.c_scroll_line.take();
             let mut new_hover_fn: Option<usize> = None;
             let mut new_c_range: Option<(usize, usize)> = None;
             let mut flash_loc: Option<usize> = None;
+            let mut c_goto_loc: Option<usize> = None;
             let scroll_req: Option<usize> = self.scroll_to.take();
             let sync_to_d = self.sync_to_d.take();
             let sync_to_c = self.sync_to_c.take();
@@ -1154,6 +1178,7 @@ impl App {
                                 hexreq: &mut hex_loc,
                                 xref_fn: &mut xref_loc,
                                 flash: &mut flash_loc,
+                                c_goto: &mut c_goto_loc,
                             };
                             render_row(ui, l, &segs, &mut sink);
                             // Instruction help tooltip on hover.
@@ -1179,15 +1204,43 @@ impl App {
                     // ---- right: decompiled C -------------------------------
                     cols[1].heading("Identity C");
                     let c_rows: Vec<&str> = text.lines().collect();
+                    // `L<n>:` label -> C line index (goto navigation targets).
+                    let label_line: HashMap<usize, usize> = c_rows
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, l)| {
+                            let t = l.trim();
+                            let n = t.strip_prefix('L')?.strip_suffix(':')?;
+                            n.parse::<usize>().ok().map(|n| (n, i))
+                        })
+                        .collect();
                     let mut sac = egui::ScrollArea::vertical()
                         .id_salt("decomp")
                         .auto_shrink([false, false]);
                     if let Some(y) = sync_to_c {
                         sac = sac.vertical_scroll_offset(y);
                     }
+                    if let Some(n) = c_scroll_line {
+                        if let Some(&li) = label_line.get(&n) {
+                            sac = sac.vertical_scroll_offset(li as f32 * mono_h);
+                        }
+                    }
                     let c_out = sac.show_rows(&mut cols[1], mono_h, c_rows.len(), |ui, rows| {
                         for i in rows {
-                            paint_row_bg(ui, mono_h, None);
+                            // Fade flash on the goto landing line.
+                            let c_flash_tint = c_flash_prev.and_then(|(li, at)| {
+                                if li != i {
+                                    return None;
+                                }
+                                let k = at.elapsed().as_secs_f32() / 0.9;
+                                if k >= 1.0 {
+                                    None
+                                } else {
+                                    let a = ((1.0 - k) * 150.0) as u8;
+                                    Some(Color32::from_rgba_unmultiplied(97, 175, 239, a))
+                                }
+                            });
+                            paint_row_bg(ui, mono_h, c_flash_tint);
                             let segs = c_segments(c_rows[i], &tok);
                             let mut sink = Sink {
                                 jump: &mut jump_loc,
@@ -1196,6 +1249,7 @@ impl App {
                                 hexreq: &mut hex_loc,
                                 xref_fn: &mut xref_loc,
                                 flash: &mut flash_loc,
+                                c_goto: &mut c_goto_loc,
                             };
                             render_row(ui, l, &segs, &mut sink);
                             // Hover/click a C line -> highlight its instructions.
@@ -1222,7 +1276,7 @@ impl App {
                     });
                     c_now = c_out.state.offset.y;
                 }),
-                CenterTab::Graph => match cfg_res {
+                CenterTab::DGraph | CenterTab::Graph => match cfg_res {
                     Some(Ok(cfg)) => cfg_canvas(
                         ui,
                         l,
@@ -1278,13 +1332,27 @@ impl App {
             self.hover_fn = new_hover_fn;
             self.c_hover_range = new_c_range;
             self.scroll_to = pending_scroll;
-            // Flash: keep the new target, expire the old one.
+            // Disasm flash: keep the new target, expire the old one.
             self.flash = match flash_loc {
                 Some(t) => Some((t, std::time::Instant::now())),
                 None => flash_prev.filter(|(_, at)| at.elapsed().as_millis() < 900),
             };
-            if self.flash.is_some() {
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+            // Identity C flash: navigate to the clicked label line.
+            self.c_scroll_line = c_goto_loc.and_then(|n| {
+                // Recompute label line on the C text we just rendered.
+                text.lines().enumerate().find_map(|(i, l)| {
+                    let t = l.trim();
+                    let r = t.strip_prefix('L')?.strip_suffix(':')?;
+                    r.parse::<usize>().ok().filter(|&rn| rn == n).map(|_| i)
+                })
+            });
+            self.c_flash = match self.c_scroll_line {
+                Some(li) => Some((li, std::time::Instant::now())),
+                None => c_flash_prev.filter(|(_, at)| at.elapsed().as_millis() < 900),
+            };
+            if self.flash.is_some() || self.c_flash.is_some() {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(33));
             }
             if hex_loc.is_some() {
                 self.hex_view = hex_loc;
@@ -1605,6 +1673,7 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                     if r.clicked() {
                         *sink.scroll = Some(*n);
                         *sink.flash = Some(*n);
+                        *sink.c_goto = Some(*n);
                     }
                 }
                 Seg::StrTok(t, addr) => {
@@ -2146,18 +2215,18 @@ fn cfg_canvas(
 
     let to_screen = |pan: egui::Vec2, zoom: f32, w: egui::Vec2| rect.min + pan + w * zoom;
 
-    // Edge label: branch op name for taken edges, "ft" for fallthrough.
+    // Edge label: `if <OP>` for taken branches, `else` for fallthrough.
     let edge_label = |bi: usize, s: usize| -> String {
         let b = &cfg.blocks[bi];
         if s == b.end {
-            return "ft".into();
+            return "else".into();
         }
         for ii in b.start..b.end {
             let ins = &l.d.insns[ii];
             if ins.op.is_branch() {
                 if let Some(t) = ins.target {
                     if t == s {
-                        return ins.op.name().to_string();
+                        return format!("if {}", ins.op.name());
                     }
                 }
             }
@@ -2183,7 +2252,7 @@ fn cfg_canvas(
                 continue;
             }
             let lbl = edge_label(bi, s);
-            let color = if lbl == "ft" {
+            let color = if lbl == "else" {
                 Color32::from_rgb(90, 150, 110)
             } else if depth[s] <= depth[bi] {
                 Color32::from_rgb(180, 120, 60)
