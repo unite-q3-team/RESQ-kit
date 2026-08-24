@@ -37,14 +37,6 @@ enum CenterTab {
     Graph,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum GraphMode {
-    /// Whole-image call graph (all functions).
-    Image,
-    /// CFG of the selected function.
-    Cfg,
-}
-
 /// Request for the floating memory hex-dump window.
 #[derive(Clone)]
 struct HexReq {
@@ -125,7 +117,6 @@ pub struct App {
     status: String,
     tab: BottomTab,
     center: CenterTab,
-    graph_mode: GraphMode,
     /// Call-graph view transform (world -> screen: `scr = pan + world * zoom`).
     graph_zoom: f32,
     graph_pan: egui::Vec2,
@@ -186,7 +177,6 @@ impl App {
             status: "open a .qvm (File menu, path field, or drag & drop)".into(),
             tab: BottomTab::Strings,
             center: CenterTab::Code,
-            graph_mode: GraphMode::Image,
             graph_zoom: 1.0,
             graph_pan: egui::Vec2::ZERO,
             graph_fit: true,
@@ -563,19 +553,13 @@ impl App {
                         ui.close_menu();
                         self.center = CenterTab::Code;
                     }
-                    if ui.button("Graph: image (call graph)").clicked() {
-                        ui.close_menu();
-                        self.center = CenterTab::Graph;
-                        self.graph_mode = GraphMode::Image;
-                    }
                     if ui.button("DGraph view (disasm graph)").clicked() {
                         ui.close_menu();
                         self.center = CenterTab::DGraph;
                     }
-                    if ui.button("Graph: CFG of selected").clicked() {
+                    if ui.button("Call graph (whole image)").clicked() {
                         ui.close_menu();
                         self.center = CenterTab::Graph;
-                        self.graph_mode = GraphMode::Cfg;
                     }
                     ui.separator();
                     if ui
@@ -585,7 +569,6 @@ impl App {
                     {
                         ui.close_menu();
                         self.center = CenterTab::Graph;
-                        self.graph_mode = GraphMode::Image;
                         if let Some(l) = &self.loaded {
                             self.graph_focus = Some(l.entry_fn());
                         }
@@ -640,7 +623,6 @@ impl App {
                     || home
                 {
                     self.center = CenterTab::Graph;
-                    self.graph_mode = GraphMode::Image;
                     if let Some(l) = &self.loaded {
                         self.graph_focus = Some(l.entry_fn());
                     }
@@ -1026,39 +1008,29 @@ impl App {
                 }
                 if self.center == CenterTab::Graph {
                     ui.separator();
-                    if ui
-                        .selectable_label(self.graph_mode == GraphMode::Image, "Image")
-                        .clicked()
-                    {
-                        self.graph_mode = GraphMode::Image;
-                    }
-                    if ui
-                        .selectable_label(self.graph_mode == GraphMode::Cfg, "Cfg")
-                        .clicked()
-                    {
-                        self.graph_mode = GraphMode::Cfg;
-                    }
                     if ui.button("Fit").clicked() {
-                        match self.graph_mode {
-                            GraphMode::Image => self.graph_fit = true,
-                            GraphMode::Cfg => self.cfg_fit = true,
-                        }
+                        self.graph_fit = true;
                     }
                     if ui.button("Reset layout").clicked() {
-                        match self.graph_mode {
-                            GraphMode::Image => self.img_offsets.clear(),
-                            GraphMode::Cfg => self.cfg_offsets.clear(),
-                        }
+                        self.img_offsets.clear();
                     }
                     ui.separator();
-                    match self.graph_mode {
-                        GraphMode::Image => ui.monospace(
-                            "drag canvas = pan, wheel = zoom, drag node = move, RMB = menu, dbl-click = open",
-                        ),
-                        GraphMode::Cfg => ui.monospace(
-                            "drag canvas = pan, wheel = vscroll, drag node = move, RMB = menu",
-                        ),
-                    };
+                    ui.monospace(
+                        "call graph: drag canvas = pan, wheel = zoom, drag node = move, RMB = menu, dbl-click = open",
+                    );
+                }
+                if self.center == CenterTab::DGraph {
+                    ui.separator();
+                    if ui.button("Fit").clicked() {
+                        self.cfg_fit = true;
+                    }
+                    if ui.button("Reset layout").clicked() {
+                        self.cfg_offsets.clear();
+                    }
+                    ui.separator();
+                    ui.monospace(
+                        "CFG: drag canvas = pan, wheel = zoom, drag node = move, RMB = menu; taken edge = `if <OP>`, green = `else`",
+                    );
                 }
             });
 
@@ -1097,8 +1069,8 @@ impl App {
                 entries: &l.entry_to_idx,
             };
             let fn_ranges = &l.fn_ranges;
-            let cfg_res = match (self.center, self.graph_mode) {
-                (CenterTab::Graph, GraphMode::Cfg) | (CenterTab::DGraph, _) => Some(l.cfg(sel)),
+            let cfg_res = match self.center {
+                CenterTab::DGraph => Some(l.cfg(sel)),
                 _ => None,
             };
 
@@ -1307,7 +1279,7 @@ impl App {
                             &mut self.img_drag,
                             &mut self.img_w,
                             &mut self.img_colw,
-                            &mut self.graph_mode,
+                            &mut self.center,
                             &mut jump_loc,
                             &mut open_code,
                         );
@@ -1771,7 +1743,7 @@ fn image_graph_pane(
     drag: &mut Option<usize>,
     img_w: &mut HashMap<usize, f32>,
     img_colw: &mut Vec<f32>,
-    mode: &mut GraphMode,
+    center: &mut CenterTab,
     jump: &mut Option<usize>,
     open_code: &mut bool,
 ) {
@@ -2058,7 +2030,7 @@ fn image_graph_pane(
             if ui.button("Show CFG").clicked() {
                 ui.close_menu();
                 *jump = Some(i);
-                *mode = GraphMode::Cfg;
+                *center = CenterTab::DGraph;
             }
             if ui.button("Center on this node").clicked() {
                 ui.close_menu();
