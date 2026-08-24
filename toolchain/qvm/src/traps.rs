@@ -508,7 +508,10 @@ mod tests {
     #[test]
     fn cgame_traps() {
         // trap_R_RegisterShaderNoMip is -58 in cgame -> index 57
-        assert_eq!(trap_name(Module::CGame, 57), Some("trap_R_RegisterShaderNoMip"));
+        assert_eq!(
+            trap_name(Module::CGame, 57),
+            Some("trap_R_RegisterShaderNoMip")
+        );
         assert_eq!(trap_name(Module::CGame, 0), Some("trap_Print"));
         assert_eq!(trap_name(Module::CGame, 16), Some("trap_SendClientCommand"));
         // game-only names must NOT leak into cgame (different numbering)
@@ -520,7 +523,10 @@ mod tests {
     fn ui_traps() {
         assert_eq!(trap_name(Module::Ui, 0), Some("trap_Error"));
         assert_eq!(trap_name(Module::Ui, 1), Some("trap_Print"));
-        assert_eq!(trap_name(Module::Ui, 20), Some("trap_R_RegisterShaderNoMip"));
+        assert_eq!(
+            trap_name(Module::Ui, 20),
+            Some("trap_R_RegisterShaderNoMip")
+        );
         assert_eq!(trap_name(Module::Ui, 12), Some("trap_Cmd_ExecuteText"));
         assert_eq!(trap_name(Module::Ui, 57), Some("trap_PC_AddGlobalDefine"));
     }

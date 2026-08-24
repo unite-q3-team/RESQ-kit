@@ -21,9 +21,21 @@ fn main() {
     let mut other = 0usize;
     let mut first_mismatch = usize::MAX;
     for k in 4..n.saturating_sub(4) {
-        let a = if k < o.data.len() { o.data[k] } else { o.lit[k - o.data.len()] };
-        let b = if k < r.data.len() { r.data[k] } else { r.lit[k - r.data.len()] };
-        let b4 = if k - 4 < r.data.len() { r.data[k - 4] } else { r.lit[k - 4 - r.data.len()] };
+        let a = if k < o.data.len() {
+            o.data[k]
+        } else {
+            o.lit[k - o.data.len()]
+        };
+        let b = if k < r.data.len() {
+            r.data[k]
+        } else {
+            r.lit[k - r.data.len()]
+        };
+        let b4 = if k - 4 < r.data.len() {
+            r.data[k - 4]
+        } else {
+            r.lit[k - 4 - r.data.len()]
+        };
         if a == b {
             ident += 1;
         }
@@ -46,8 +58,16 @@ fn main() {
         let mut ob: Vec<u8> = Vec::new();
         let mut rb: Vec<u8> = Vec::new();
         for j in k..k + 24 {
-            ob.push(if j < o.data.len() { o.data[j] } else { o.lit[j - o.data.len()] });
-            rb.push(if j < r.data.len() { r.data[j] } else { r.lit[j - r.data.len()] });
+            ob.push(if j < o.data.len() {
+                o.data[j]
+            } else {
+                o.lit[j - o.data.len()]
+            });
+            rb.push(if j < r.data.len() {
+                r.data[j]
+            } else {
+                r.lit[j - r.data.len()]
+            });
         }
         println!("first mismatch at {k}: orig {ob:02x?}  rebuilt {rb:02x?}");
     }

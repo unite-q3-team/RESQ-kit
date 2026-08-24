@@ -3,7 +3,7 @@
 //!
 //! Usage: probe_trace <qvm> <fn> <arg0> <arg1> ... [--cap N]
 
-use qvm::{Emu, build_functions, disassemble, load};
+use qvm::{build_functions, disassemble, load, Emu};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -18,8 +18,14 @@ fn main() {
     let mut i = 2;
     while i < a.len() {
         match a[i].as_str() {
-            "--cap" => { cap = a[i + 1].parse().unwrap(); i += 2; }
-            s => { args.push(s.parse().unwrap()); i += 1; }
+            "--cap" => {
+                cap = a[i + 1].parse().unwrap();
+                i += 2;
+            }
+            s => {
+                args.push(s.parse().unwrap());
+                i += 1;
+            }
         }
     }
 
@@ -33,7 +39,10 @@ fn main() {
     emu.set_max_steps(cap);
     emu.trace = true;
     match emu.call(start, &args) {
-        Ok(v) => println!("RESULT {v}  steps={} syscalls={}", emu.stats.steps, emu.stats.syscalls),
+        Ok(v) => println!(
+            "RESULT {v}  steps={} syscalls={}",
+            emu.stats.steps, emu.stats.syscalls
+        ),
         Err(e) => println!("ERROR: {e}  steps={}", emu.stats.steps),
     }
 }

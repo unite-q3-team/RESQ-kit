@@ -5,7 +5,7 @@
 //!
 //! Usage: probe_calls <path.qvm> <fn_entry_insn> [<map.txt>]
 
-use qvm::{Opcode, build_functions, disassemble, load};
+use qvm::{build_functions, disassemble, load, Opcode};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -66,7 +66,10 @@ fn main() {
         .copied()
         .unwrap_or((entry, d.insns.len()));
 
-    println!("fn entry {entry} range {start}..{end} ({} insns)", end - start);
+    println!(
+        "fn entry {entry} range {start}..{end} ({} insns)",
+        end - start
+    );
     for insn in &d.insns[start..end] {
         match insn.op {
             Opcode::Call => {

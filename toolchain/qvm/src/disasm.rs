@@ -98,14 +98,23 @@ pub fn disassemble(qvm: &Qvm) -> Result<Disassembly, DisasmError> {
     let mut pc = 0usize;
     for i in 0..n {
         if pc >= code.len() {
-            return Err(DisasmError { insn_idx: i, n, pc, code_len: code.len() });
+            return Err(DisasmError {
+                insn_idx: i,
+                n,
+                pc,
+                code_len: code.len(),
+            });
         }
         let op = Opcode::from_u8(code[pc]).unwrap_or(Opcode::Undef);
         insn_at.insert(pc, i);
 
         let (operand, target, size) = if op.has_int32_operand() {
             let v = i32::from_le_bytes([code[pc + 1], code[pc + 2], code[pc + 3], code[pc + 4]]);
-            let tgt = if op.is_branch_idx() { Some(v as usize) } else { None };
+            let tgt = if op.is_branch_idx() {
+                Some(v as usize)
+            } else {
+                None
+            };
             (Some(v), tgt, 1 + 4)
         } else if op.has_byte_operand() {
             (Some(code[pc + 1] as i32), None, 1 + 1)
@@ -113,7 +122,14 @@ pub fn disassemble(qvm: &Qvm) -> Result<Disassembly, DisasmError> {
             (None, None, 1)
         };
 
-        insns.push(Insn { idx: i, addr: pc, op, operand, size, target });
+        insns.push(Insn {
+            idx: i,
+            addr: pc,
+            op,
+            operand,
+            size,
+            target,
+        });
         pc += size;
     }
 
@@ -127,8 +143,16 @@ mod tests {
 
     fn qvm_from_parts(code: &[u8], instr_count: i32) -> crate::loader::Qvm {
         let mut f = Vec::new();
-        for v in [0x12721444u32, instr_count as u32, 32u32, code.len() as u32,
-                  32 + code.len() as u32, 0u32, 0u32, 0u32] {
+        for v in [
+            0x12721444u32,
+            instr_count as u32,
+            32u32,
+            code.len() as u32,
+            32 + code.len() as u32,
+            0u32,
+            0u32,
+            0u32,
+        ] {
             f.extend_from_slice(&v.to_le_bytes());
         }
         f.extend_from_slice(code);
@@ -139,16 +163,16 @@ mod tests {
     fn decodes_typical_sequence() {
         // ENTER 36; LOCAL 44; LOAD4; CONST 5; ADD; ARG 8; CONST 1800; CALL; POP; LEAVE 36
         let code = [
-            0x03, 36, 0, 0, 0,        // ENTER 36
-            0x09, 44, 0, 0, 0,        // LOCAL 44
-            0x1d,                     // LOAD4
-            0x08, 5, 0, 0, 0,         // CONST 5
-            0x26,                     // ADD
-            0x21, 8,                  // ARG 8
-            0x08, 0x08, 0x07, 0, 0,   // CONST 1800
-            0x05,                     // CALL
-            0x07,                     // POP
-            0x04, 36, 0, 0, 0,        // LEAVE 36
+            0x03, 36, 0, 0, 0, // ENTER 36
+            0x09, 44, 0, 0, 0,    // LOCAL 44
+            0x1d, // LOAD4
+            0x08, 5, 0, 0, 0,    // CONST 5
+            0x26, // ADD
+            0x21, 8, // ARG 8
+            0x08, 0x08, 0x07, 0, 0,    // CONST 1800
+            0x05, // CALL
+            0x07, // POP
+            0x04, 36, 0, 0, 0, // LEAVE 36
         ];
         let q = qvm_from_parts(&code, 10);
         let d = disassemble(&q).unwrap();
@@ -174,9 +198,7 @@ mod tests {
     fn branch_target_is_insn_index() {
         // CONST 1; CONST 2; GTI #0; LEAVE 0
         let code = [
-            0x08, 1, 0, 0, 0,
-            0x08, 2, 0, 0, 0,
-            0x0f, 0, 0, 0, 0,   // GTI 0
+            0x08, 1, 0, 0, 0, 0x08, 2, 0, 0, 0, 0x0f, 0, 0, 0, 0, // GTI 0
             0x04, 0, 0, 0, 0,
         ];
         let q = qvm_from_parts(&code, 4);

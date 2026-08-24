@@ -10,9 +10,9 @@ use qvm::{disassemble, load, Emu};
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let path = &a[0];
-    let entry: usize = a.get(1).map(|s| s.parse().ok()).flatten().unwrap_or(31013);
+    let entry: usize = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(31013);
     let fmt = a.get(2).map(|s| s.as_str()).unwrap_or("%5.2f");
-    let fval: f32 = a.get(3).map(|s| s.parse().ok()).flatten().unwrap_or(4.0);
+    let fval: f32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(4.0);
 
     let q = load(path).expect("load qvm");
     let d = disassemble(&q).expect("disasm");
@@ -52,7 +52,10 @@ fn main() {
         p += 1;
     }
     println!("buffer=[{out}]");
-    println!("stats: steps={} syscalls={}", emu.stats.steps, emu.stats.syscalls);
+    println!(
+        "stats: steps={} syscalls={}",
+        emu.stats.steps, emu.stats.syscalls
+    );
 
     let expected = " 4.00";
     if out == expected {

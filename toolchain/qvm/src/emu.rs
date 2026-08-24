@@ -52,6 +52,10 @@ impl Memory {
         self.data.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     /// Mask a VM data-space address.
     #[inline]
     pub fn masked(&self, addr: i32) -> usize {
@@ -89,7 +93,12 @@ impl Memory {
     #[inline]
     pub fn load4(&self, addr: i32) -> i32 {
         let a = self.masked(addr);
-        i32::from_le_bytes([self.data[a], self.data[a + 1], self.data[a + 2], self.data[a + 3]])
+        i32::from_le_bytes([
+            self.data[a],
+            self.data[a + 1],
+            self.data[a + 2],
+            self.data[a + 3],
+        ])
     }
 
     #[inline]
@@ -132,7 +141,12 @@ pub enum EmuError {
     /// Division or modulo by zero.
     DivByZero,
     /// BLOCK_COPY destination/source range crossed the data mask.
-    BlockCopyRange { dest: u32, src: u32, n: i32, mask: u32 },
+    BlockCopyRange {
+        dest: u32,
+        src: u32,
+        n: i32,
+        mask: u32,
+    },
 }
 
 impl std::fmt::Display for EmuError {
@@ -141,11 +155,19 @@ impl std::fmt::Display for EmuError {
             EmuError::Unsupported(op) => write!(f, "unsupported opcode {op:?}"),
             EmuError::StepLimit(n) => write!(f, "step limit ({n}) exceeded"),
             EmuError::BadTarget { kind, idx } => write!(f, "{kind} target out of range: {idx}"),
-            EmuError::PcOverflow { pc, len } => write!(f, "program counter {pc} past end of code ({len} insns)"),
-            EmuError::BadStackAddr { addr, len } => write!(f, "program-stack access at {addr} out of data space ({len} bytes)"),
+            EmuError::PcOverflow { pc, len } => {
+                write!(f, "program counter {pc} past end of code ({len} insns)")
+            }
+            EmuError::BadStackAddr { addr, len } => write!(
+                f,
+                "program-stack access at {addr} out of data space ({len} bytes)"
+            ),
             EmuError::DivByZero => write!(f, "division by zero"),
             EmuError::BlockCopyRange { dest, src, n, mask } => {
-                write!(f, "BLOCK_COPY out of range: dest={dest:#x} src={src:#x} n={n} mask={mask:#x}")
+                write!(
+                    f,
+                    "BLOCK_COPY out of range: dest={dest:#x} src={src:#x} n={n} mask={mask:#x}"
+                )
             }
         }
     }
@@ -165,6 +187,9 @@ pub struct Stats {
     /// instruction index -> how many times it was the target of `ENTER`.
     pub entries: HashMap<usize, usize>,
 }
+
+/// Optional per-instruction callback (`pc` is the current instruction index).
+pub type StepHook<'a> = Box<dyn FnMut(&mut Emu<'a>, usize) + 'a>;
 
 /// QVM bytecode interpreter.
 pub struct Emu<'a> {
@@ -197,7 +222,7 @@ pub struct Emu<'a> {
     pub step_pcs: Option<Rc<RefCell<Vec<usize>>>>,
     /// Optional per-instruction callback, fired BEFORE each instruction with
     /// the current pc (diagnostics: dump frames/globals at a specific insn).
-    pub step_hook: Option<Box<dyn FnMut(&mut Emu<'a>, usize)>>,
+    pub step_hook: Option<StepHook<'a>>,
 }
 
 impl<'a> Emu<'a> {
@@ -250,7 +275,7 @@ impl<'a> Emu<'a> {
 
     /// Install a per-instruction hook (fires with the current pc before the
     /// instruction executes). Used by diagnostics to dump frame/memory state.
-    pub fn with_step_hook(mut self, hook: Box<dyn FnMut(&mut Emu<'a>, usize)>) -> Self {
+    pub fn with_step_hook(mut self, hook: StepHook<'a>) -> Self {
         self.step_hook = Some(hook);
         self
     }
@@ -303,10 +328,16 @@ impl<'a> Emu<'a> {
         }
         self.mem
             .write_i32_raw(self.program_stack + 4, 0)
-            .ok_or(EmuError::BadStackAddr { addr: self.program_stack + 4, len: self.mem.len() })?;
+            .ok_or(EmuError::BadStackAddr {
+                addr: self.program_stack + 4,
+                len: self.mem.len(),
+            })?;
         self.mem
             .write_i32_raw(self.program_stack, -1)
-            .ok_or(EmuError::BadStackAddr { addr: self.program_stack, len: self.mem.len() })?;
+            .ok_or(EmuError::BadStackAddr {
+                addr: self.program_stack,
+                len: self.mem.len(),
+            })?;
 
         self.op_ofs = 0;
         self.trap_insns.clear();
@@ -317,10 +348,10 @@ impl<'a> Emu<'a> {
             if self.stats.steps > self.max_steps {
                 return Err(EmuError::StepLimit(self.max_steps));
             }
-            let insn = self
-                .insns
-                .get(pc)
-                .ok_or(EmuError::PcOverflow { pc, len: self.insns.len() })?;
+            let insn = self.insns.get(pc).ok_or(EmuError::PcOverflow {
+                pc,
+                len: self.insns.len(),
+            })?;
             if self.trace {
                 println!("{:>6}: {insn}", self.op_ofs);
             }
@@ -366,7 +397,11 @@ impl<'a> Emu<'a> {
                 Opcode::Store1 => {
                     let (addr, val) = (self.r1(), self.r0());
                     if self.watch_store == Some(addr & self.mem.data_mask as i32) {
-                        println!("WATCH[{}] STORE1 addr=0x{:x} val={val} insn={pc}", self.watch_label.unwrap_or("?"), addr as u32);
+                        println!(
+                            "WATCH[{}] STORE1 addr=0x{:x} val={val} insn={pc}",
+                            self.watch_label.unwrap_or("?"),
+                            addr as u32
+                        );
                     }
                     self.mem.store1(addr, val);
                     self.op_ofs = self.op_ofs.wrapping_sub(2);
@@ -374,7 +409,11 @@ impl<'a> Emu<'a> {
                 Opcode::Store2 => {
                     let (addr, val) = (self.r1(), self.r0());
                     if self.watch_store == Some(addr & self.mem.data_mask as i32) {
-                        println!("WATCH[{}] STORE2 addr=0x{:x} val={val} insn={pc}", self.watch_label.unwrap_or("?"), addr as u32);
+                        println!(
+                            "WATCH[{}] STORE2 addr=0x{:x} val={val} insn={pc}",
+                            self.watch_label.unwrap_or("?"),
+                            addr as u32
+                        );
                     }
                     self.mem.store2(addr, val);
                     self.op_ofs = self.op_ofs.wrapping_sub(2);
@@ -407,7 +446,8 @@ impl<'a> Emu<'a> {
                             println!("WATCH BLOCK_COPY dest=0x{d:x} src=0x{src:x} n={n} covers watch 0x{w:x} insn={pc}");
                         }
                     }
-                    if dest & mask != dest || src & mask != src
+                    if dest & mask != dest
+                        || src & mask != src
                         || (dest.wrapping_add(n as u32)) & mask != dest.wrapping_add(n as u32)
                         || (src.wrapping_add(n as u32)) & mask != src.wrapping_add(n as u32)
                     {
@@ -424,7 +464,10 @@ impl<'a> Emu<'a> {
                     // save return address in the current frame
                     self.mem
                         .write_i32_raw(self.program_stack, pc as i32 + 1)
-                        .ok_or(EmuError::BadStackAddr { addr: self.program_stack, len: self.mem.len() })?;
+                        .ok_or(EmuError::BadStackAddr {
+                            addr: self.program_stack,
+                            len: self.mem.len(),
+                        })?;
                     let target = self.r0();
                     self.op_ofs = self.op_ofs.wrapping_sub(1);
 
@@ -432,9 +475,12 @@ impl<'a> Emu<'a> {
                         // system call
                         let num = -1 - target;
                         self.trap_insns.push(pc);
-                        self.mem
-                            .write_i32_raw(self.program_stack + 4, num)
-                            .ok_or(EmuError::BadStackAddr { addr: self.program_stack + 4, len: self.mem.len() })?;
+                        self.mem.write_i32_raw(self.program_stack + 4, num).ok_or(
+                            EmuError::BadStackAddr {
+                                addr: self.program_stack + 4,
+                                len: self.mem.len(),
+                            },
+                        )?;
                         self.stats.syscalls += 1;
                         *self.stats.syscall_counts.entry(num).or_insert(0) += 1;
 
@@ -452,17 +498,21 @@ impl<'a> Emu<'a> {
                         };
                         self.op_ofs = self.op_ofs.wrapping_add(1);
                         self.op[self.op_ofs as usize] = r;
-                        npc = self
-                            .mem
-                            .read_i32_raw(self.program_stack)
-                            .ok_or(EmuError::BadStackAddr { addr: self.program_stack, len: self.mem.len() })?
-                            as usize;
+                        npc = self.mem.read_i32_raw(self.program_stack).ok_or(
+                            EmuError::BadStackAddr {
+                                addr: self.program_stack,
+                                len: self.mem.len(),
+                            },
+                        )? as usize;
                     } else {
                         if self.trace {
                             println!("      CALL -> #{target}");
                         }
                         if target as usize >= self.insns.len() {
-                            return Err(EmuError::BadTarget { kind: "CALL", idx: target });
+                            return Err(EmuError::BadTarget {
+                                kind: "CALL",
+                                idx: target,
+                            });
                         }
                         npc = target as usize;
                     }
@@ -479,11 +529,17 @@ impl<'a> Emu<'a> {
                         // ps0 = program_stack before ENTER subtracted v.
                         let f = self.program_stack + v + 8;
                         let arg = |k: i32| -> String {
-                            self.mem.read_i32_raw(f + 4 * k)
+                            self.mem
+                                .read_i32_raw(f + 4 * k)
                                 .map(|x| format!("{x}"))
                                 .unwrap_or_else(|| "?".into())
                         };
-                        println!("      ENTER v={v} args=[{}, {}, {}]", arg(0), arg(1), arg(2));
+                        println!(
+                            "      ENTER v={v} args=[{}, {}, {}]",
+                            arg(0),
+                            arg(1),
+                            arg(2)
+                        );
                     }
                     *self.stats.entries.entry(pc).or_insert(0) += 1;
                 }
@@ -491,16 +547,21 @@ impl<'a> Emu<'a> {
                 Opcode::Leave => {
                     let v = insn.operand.unwrap_or(0);
                     self.program_stack += v;
-                    let ret = self
-                        .mem
-                        .read_i32_raw(self.program_stack)
-                        .ok_or(EmuError::BadStackAddr { addr: self.program_stack, len: self.mem.len() })?;
+                    let ret = self.mem.read_i32_raw(self.program_stack).ok_or(
+                        EmuError::BadStackAddr {
+                            addr: self.program_stack,
+                            len: self.mem.len(),
+                        },
+                    )?;
                     if ret == -1 {
                         // leave the VM: result = op stack top
                         return Ok(self.r0());
                     }
                     if ret as usize >= self.insns.len() {
-                        return Err(EmuError::BadTarget { kind: "LEAVE", idx: ret });
+                        return Err(EmuError::BadTarget {
+                            kind: "LEAVE",
+                            idx: ret,
+                        });
                     }
                     npc = ret as usize;
                 }
@@ -509,15 +570,31 @@ impl<'a> Emu<'a> {
                     let target = self.r0();
                     self.op_ofs = self.op_ofs.wrapping_sub(1);
                     if target < 0 || target as usize >= self.insns.len() {
-                        return Err(EmuError::BadTarget { kind: "JUMP", idx: target });
+                        return Err(EmuError::BadTarget {
+                            kind: "JUMP",
+                            idx: target,
+                        });
                     }
                     npc = target as usize;
                 }
 
                 // comparisons: pop 2; r1 is the deeper operand, r0 the top
-                Opcode::Eq | Opcode::Ne | Opcode::Lti | Opcode::Lei | Opcode::Gti | Opcode::Gei
-                | Opcode::Ltu | Opcode::Leu | Opcode::Gtu | Opcode::Geu
-                | Opcode::Eqf | Opcode::Nef | Opcode::Ltf | Opcode::Lef | Opcode::Gtf | Opcode::Gef => {
+                Opcode::Eq
+                | Opcode::Ne
+                | Opcode::Lti
+                | Opcode::Lei
+                | Opcode::Gti
+                | Opcode::Gei
+                | Opcode::Ltu
+                | Opcode::Leu
+                | Opcode::Gtu
+                | Opcode::Geu
+                | Opcode::Eqf
+                | Opcode::Nef
+                | Opcode::Ltf
+                | Opcode::Lef
+                | Opcode::Gtf
+                | Opcode::Gef => {
                     let (r1, r0) = (self.r1(), self.r0());
                     self.op_ofs = self.op_ofs.wrapping_sub(2);
                     let taken = match opcode {
@@ -619,12 +696,12 @@ impl<'a> Emu<'a> {
                 Opcode::Lsh => {
                     let (a, b) = (self.r1(), self.r0());
                     self.op_ofs = self.op_ofs.wrapping_sub(1);
-                    self.op[self.op_ofs as usize] = a.wrapping_shl((b as u32 & 31) as u32);
+                    self.op[self.op_ofs as usize] = a.wrapping_shl(b as u32 & 31);
                 }
                 Opcode::Rshi => {
                     let (a, b) = (self.r1(), self.r0());
                     self.op_ofs = self.op_ofs.wrapping_sub(1);
-                    self.op[self.op_ofs as usize] = a.wrapping_shr((b as u32 & 31) as u32);
+                    self.op[self.op_ofs as usize] = a.wrapping_shr(b as u32 & 31);
                 }
                 Opcode::Rshu => {
                     let (a, b) = (self.r1() as u32, self.r0() as u32);
@@ -673,8 +750,16 @@ mod tests {
 
     fn qvm_from_parts(code: &[u8], instr_count: i32, bss: i32) -> Qvm {
         let mut f = Vec::new();
-        for v in [0x12721444u32, instr_count as u32, 32u32, code.len() as u32,
-                  32 + code.len() as u32, 0u32, 0u32, bss as u32] {
+        for v in [
+            0x12721444u32,
+            instr_count as u32,
+            32u32,
+            code.len() as u32,
+            32 + code.len() as u32,
+            0u32,
+            0u32,
+            bss as u32,
+        ] {
             f.extend_from_slice(&v.to_le_bytes());
         }
         f.extend_from_slice(code);
@@ -696,12 +781,12 @@ mod tests {
 
     /// `int f(int x) { return x + 3; }` (lcc layout)
     const ADD3: &[u8] = &[
-        0x03, 0, 0, 0, 0,     // ENTER 0
-        0x09, 8, 0, 0, 0,     // LOCAL 8
-        0x1d,                 // LOAD4
-        0x08, 3, 0, 0, 0,     // CONST 3
-        0x26,                 // ADD
-        0x04, 0, 0, 0, 0,     // LEAVE 0
+        0x03, 0, 0, 0, 0, // ENTER 0
+        0x09, 8, 0, 0, 0,    // LOCAL 8
+        0x1d, // LOAD4
+        0x08, 3, 0, 0, 0,    // CONST 3
+        0x26, // ADD
+        0x04, 0, 0, 0, 0, // LEAVE 0
     ];
 
     #[test]
@@ -715,13 +800,13 @@ mod tests {
     fn store_and_load4() {
         // *(int*)0 = 0x12345678; return *(int*)0;
         let code: &[u8] = &[
-            0x03, 0, 0, 0, 0,   // ENTER 0
-            0x08, 0, 0, 0, 0,   // CONST 0            (address)
+            0x03, 0, 0, 0, 0, // ENTER 0
+            0x08, 0, 0, 0, 0, // CONST 0            (address)
             0x08, 0x78, 0x56, 0x34, 0x12, // CONST 0x12345678
-            0x20,               // STORE4
-            0x08, 0, 0, 0, 0,   // CONST 0
-            0x1d,               // LOAD4
-            0x04, 0, 0, 0, 0,   // LEAVE 0
+            0x20, // STORE4
+            0x08, 0, 0, 0, 0,    // CONST 0
+            0x1d, // LOAD4
+            0x04, 0, 0, 0, 0, // LEAVE 0
         ];
         let mut e = emu_for(code, 7);
         assert_eq!(e.call(0, &[]).unwrap() as u32, 0x12345678);
@@ -732,15 +817,15 @@ mod tests {
         // int f(int x){ if (x < 5) return 1; return 2; }
         // lcc: LTI jumps to the `then` block when x<5 holds.
         let code: &[u8] = &[
-            0x03, 0, 0, 0, 0,   // ENTER 0
-            0x09, 8, 0, 0, 0,   // LOCAL 8
-            0x1d,               // LOAD4
-            0x08, 5, 0, 0, 0,   // CONST 5
-            0x0d, 7, 0, 0, 0,   // LTI #7          (x<5 -> return 1)
-            0x08, 2, 0, 0, 0,   // CONST 2         (else: return 2)
-            0x04, 0, 0, 0, 0,   // LEAVE 0
-            0x08, 1, 0, 0, 0,   // CONST 1
-            0x04, 0, 0, 0, 0,   // LEAVE 0
+            0x03, 0, 0, 0, 0, // ENTER 0
+            0x09, 8, 0, 0, 0,    // LOCAL 8
+            0x1d, // LOAD4
+            0x08, 5, 0, 0, 0, // CONST 5
+            0x0d, 7, 0, 0, 0, // LTI #7          (x<5 -> return 1)
+            0x08, 2, 0, 0, 0, // CONST 2         (else: return 2)
+            0x04, 0, 0, 0, 0, // LEAVE 0
+            0x08, 1, 0, 0, 0, // CONST 1
+            0x04, 0, 0, 0, 0, // LEAVE 0
         ];
         let mut e = emu_for(code, 9);
         assert_eq!(e.call(0, &[3]).unwrap(), 1);
@@ -752,12 +837,12 @@ mod tests {
     fn arg_writes_frame_slot() {
         // ENTER 4; CONST 77; ARG 8; LOCAL 8; LOAD4; LEAVE 4  => 77
         let code: &[u8] = &[
-            0x03, 4, 0, 0, 0,   // ENTER 4
-            0x08, 77, 0, 0, 0,  // CONST 77
-            0x21, 8,            // ARG 8
-            0x09, 8, 0, 0, 0,   // LOCAL 8
-            0x1d,               // LOAD4
-            0x04, 4, 0, 0, 0,   // LEAVE 4
+            0x03, 4, 0, 0, 0, // ENTER 4
+            0x08, 77, 0, 0, 0, // CONST 77
+            0x21, 8, // ARG 8
+            0x09, 8, 0, 0, 0,    // LOCAL 8
+            0x1d, // LOAD4
+            0x04, 4, 0, 0, 0, // LEAVE 4
         ];
         let mut e = emu_for(code, 6);
         assert_eq!(e.call(0, &[]).unwrap(), 77);
@@ -771,10 +856,10 @@ mod tests {
         // (ENTER 80 places the frame deep enough that reading 16 syscall
         //  argument words stays within the data space)
         let code: &[u8] = &[
-            0x03, 80, 0, 0, 0,  // ENTER 80
+            0x03, 80, 0, 0, 0, // ENTER 80
             0x08, 0xFD, 0xFF, 0xFF, 0xFF, // CONST -3  (syscall 2)
-            0x05,               // CALL
-            0x04, 80, 0, 0, 0,  // LEAVE 80
+            0x05, // CALL
+            0x04, 80, 0, 0, 0, // LEAVE 80
         ];
         let mut e = emu_for_bss(code, 4, 512);
         let seen = Rc::new(Cell::new(None));
@@ -794,11 +879,11 @@ mod tests {
     fn float_ops() {
         // return 1.5f + 2.25f  (as bits)
         let code: &[u8] = &[
-            0x03, 0, 0, 0, 0,   // ENTER 0
+            0x03, 0, 0, 0, 0, // ENTER 0
             0x08, 0, 0, 0xC0, 0x3F, // CONST bits(1.5f)
             0x08, 0, 0, 0x10, 0x40, // CONST bits(2.25f)
-            0x36,               // ADDF
-            0x04, 0, 0, 0, 0,   // LEAVE 0
+            0x36, // ADDF
+            0x04, 0, 0, 0, 0, // LEAVE 0
         ];
         let mut e = emu_for(code, 5);
         let r = e.call(0, &[]).unwrap() as u32;
@@ -809,8 +894,8 @@ mod tests {
     fn step_limit_triggered() {
         // CONST 0; JUMP -> #0  (infinite loop)
         let code: &[u8] = &[
-            0x08, 0, 0, 0, 0,   // CONST 0
-            0x0a,               // JUMP
+            0x08, 0, 0, 0, 0,    // CONST 0
+            0x0a, // JUMP
         ];
         let mut e = emu_for(code, 2);
         e.set_max_steps(1000);
@@ -821,13 +906,13 @@ mod tests {
     fn block_copy() {
         // mem at data[8] = copy of data[4]; return *(int*)8
         let code: &[u8] = &[
-            0x03, 0, 0, 0, 0,   // ENTER 0
-            0x08, 8, 0, 0, 0,   // CONST 8        (dest)
-            0x08, 4, 0, 0, 0,   // CONST 4        (src)
-            0x22, 4, 0, 0, 0,   // BLOCK_COPY 4
-            0x08, 8, 0, 0, 0,   // CONST 8
-            0x1d,               // LOAD4
-            0x04, 0, 0, 0, 0,   // LEAVE 0
+            0x03, 0, 0, 0, 0, // ENTER 0
+            0x08, 8, 0, 0, 0, // CONST 8        (dest)
+            0x08, 4, 0, 0, 0, // CONST 4        (src)
+            0x22, 4, 0, 0, 0, // BLOCK_COPY 4
+            0x08, 8, 0, 0, 0,    // CONST 8
+            0x1d, // LOAD4
+            0x04, 0, 0, 0, 0, // LEAVE 0
         ];
         let mut e = emu_for_bss(code, 7, 512);
         // seed data words 0..3

@@ -11,7 +11,7 @@ use qvm::{build_functions, disassemble, load, Memory};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    let (orig_path, reb_path) = (&a[0], &a[1]);
+    let (_orig_path, _reb_path) = (&a[0], &a[1]);
     let side = a.get(2).map(|s| s.as_str()).unwrap_or("rebld");
 
     let seq: &[(i32, i32, i32, i32)] = &[
@@ -56,10 +56,19 @@ fn main() {
             f32::from_bits(m.load4(ps + 36) as u32),
             f32::from_bits(m.load4(ps + 40) as u32),
         );
-        println!("    data[0..40]={:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}", 
-            m.load4(0) as u32, m.load4(4) as u32, m.load4(8) as u32, m.load4(12) as u32,
-            m.load4(16) as u32, m.load4(20) as u32, m.load4(24) as u32, m.load4(28) as u32,
-            m.load4(32) as u32, m.load4(36) as u32);
+        println!(
+            "    data[0..40]={:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}",
+            m.load4(0) as u32,
+            m.load4(4) as u32,
+            m.load4(8) as u32,
+            m.load4(12) as u32,
+            m.load4(16) as u32,
+            m.load4(20) as u32,
+            m.load4(24) as u32,
+            m.load4(28) as u32,
+            m.load4(32) as u32,
+            m.load4(36) as u32
+        );
         // pml globals: frametime@0x107528, movetime@0x10752c, fwd/right/up vecs @0x107500..0x10750c
         let ft = m.load4(0x107528);
         let mv = m.load4(0x10752c);
@@ -75,10 +84,7 @@ fn main() {
         );
     }
 
-    for (label, qv, dv, start) in [
-        ("orig", q, d, start1),
-        ("rebld", q2, d2, start2),
-    ] {
+    for (label, qv, dv, start) in [("orig", q, d, start1), ("rebld", q2, d2, start2)] {
         if label != side && side != "both" {
             continue;
         }
@@ -87,19 +93,21 @@ fn main() {
         let mut inner = hc.syscall;
         let dumped = Rc::new(RefCell::new(0usize));
         let n = dumped.clone();
-        let emu = qvm::Emu::new(&dv.insns, qv).with_syscall(Box::new(move |m: &mut Memory, num, args| {
-            if num == 106 {
-                let got = *n.borrow();
-                *n.borrow_mut() += 1;
-                let arg = args[1];
-                println!(
-                    "[{label}] TRAP sqrt #{got} arg={arg} ({arg:#010x}) f={}",
-                    f32::from_bits(arg as u32)
-                );
-                dump(label, m, 0);
-            }
-            inner(m, num, args)
-        }));
+        let emu = qvm::Emu::new(&dv.insns, qv).with_syscall(Box::new(
+            move |m: &mut Memory, num, args| {
+                if num == 106 {
+                    let got = *n.borrow();
+                    *n.borrow_mut() += 1;
+                    let arg = args[1];
+                    println!(
+                        "[{label}] TRAP sqrt #{got} arg={arg} ({arg:#010x}) f={}",
+                        f32::from_bits(arg as u32)
+                    );
+                    dump(label, m, 0);
+                }
+                inner(m, num, args)
+            },
+        ));
         println!("=== {label} session ===");
         let mut emu = emu;
         for (ci, cmd) in seq.iter().copied().enumerate() {

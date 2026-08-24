@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use qvm::probe_common::{make_handler_ctrl, TrapLog};
-use qvm::{build_functions, disassemble, load, Emu, Memory};
+use qvm::{build_functions, disassemble, load, Emu};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -69,11 +69,12 @@ fn main() {
             f32::from_bits(a1 as u32),
             f32::from_bits(a2 as u32)
         );
-        let wd_raw: Vec<u32> = (0..3).map(|i| m.load4(a0.wrapping_add(4 * i)) as u32).collect();
+        let wd_raw: Vec<u32> = (0..3)
+            .map(|i| m.load4(a0.wrapping_add(4 * i)) as u32)
+            .collect();
         println!(
             "    wishdir=[{} {} {}] (0x{:08x} 0x{:08x} 0x{:08x})",
-            wd_raw[0], wd_raw[1], wd_raw[2],
-            wd_raw[0], wd_raw[1], wd_raw[2]
+            wd_raw[0], wd_raw[1], wd_raw[2], wd_raw[0], wd_raw[1], wd_raw[2]
         );
         // caller frame: p0 = loc_0 + 48 (wishdir), so loc_0 = p0-48.
         // wishvel = loc_0+32..44, wishspeed = loc_0[44]
@@ -83,9 +84,9 @@ fn main() {
         let wc = m.load4(base + 52);
         println!(
             "    caller loc_0@{base:#x}: wishvel=[{} {} {}] wishspeed={} walkSpeed={}",
-            f32::from_bits(wv[0] as u32),
-            f32::from_bits(wv[1] as u32),
-            f32::from_bits(wv[2] as u32),
+            f32::from_bits(wv[0]),
+            f32::from_bits(wv[1]),
+            f32::from_bits(wv[2]),
             f32::from_bits(ws as u32),
             f32::from_bits(wc as u32)
         );
@@ -115,14 +116,18 @@ fn main() {
         );
     }
 
-    for (label, path, cfg, writer, call_tgt, vn_tgt, cms_tgt) in [
+    for (label, path, cfg, writer, call_tgt, _vn_tgt, _cms_tgt) in [
         // Capture both sides at the ENTER instruction, before the callee
         // adjusts program_stack. The former 20897 watchpoint was an internal
         // STORE and mixed caller/callee frame layouts.
-        ("orig", &a[0], &cfg1, 20786usize, 20786usize, 36686usize, 20910usize),
+        (
+            "orig", &a[0], &cfg1, 20786usize, 20786usize, 36686usize, 20910usize,
+        ),
         // These are q3asm instruction entries from _emit_u3/qagame.map, not
         // source labels from an earlier u2 emission.
-        ("rebld", &a[1], &cfg2, 32588usize, 32588usize, 0usize, 32714usize),
+        (
+            "rebld", &a[1], &cfg2, 32588usize, 32588usize, 0usize, 32714usize,
+        ),
     ] {
         if label != side && side != "both" {
             continue;
@@ -133,26 +138,32 @@ fn main() {
             if let Ok(txt) = std::fs::read_to_string("qagame.names") {
                 for line in txt.lines() {
                     let mut it = line.split_whitespace();
-                    let (Some(idx), Some(name)) = (it.next(), it.next()) else { continue };
-                    if let Ok(i) = idx.trim_start_matches("fn[").trim_end_matches(']').parse::<usize>() {
+                    let (Some(idx), Some(name)) = (it.next(), it.next()) else {
+                        continue;
+                    };
+                    if let Ok(i) = idx
+                        .trim_start_matches("fn[")
+                        .trim_end_matches(']')
+                        .parse::<usize>()
+                    {
                         if let Some(entry) = cfg.get(i).map(|r| r.0) {
                             q.names.insert(entry, name.to_string());
                         }
                     }
                 }
             }
-        } else {
-            if let Ok(txt) = std::fs::read_to_string("qagame.map") {
-                for line in txt.lines() {
-                    let mut it = line.split_whitespace();
-                    let (Some(a0), Some(a1), Some(name)) = (it.next(), it.next(), it.next()) else { continue };
-                    if a0 != "0" {
-                        continue;
-                    }
-                    if let Ok(insn) = usize::from_str_radix(a1, 16) {
-                        if let Some(entry) = cfg.iter().find(|r| r.0 == insn).map(|r| r.0) {
-                            q.names.insert(entry, name.to_string());
-                        }
+        } else if let Ok(txt) = std::fs::read_to_string("qagame.map") {
+            for line in txt.lines() {
+                let mut it = line.split_whitespace();
+                let (Some(a0), Some(a1), Some(name)) = (it.next(), it.next(), it.next()) else {
+                    continue;
+                };
+                if a0 != "0" {
+                    continue;
+                }
+                if let Ok(insn) = usize::from_str_radix(a1, 16) {
+                    if let Some(entry) = cfg.iter().find(|r| r.0 == insn).map(|r| r.0) {
+                        q.names.insert(entry, name.to_string());
                     }
                 }
             }
@@ -189,9 +200,15 @@ fn main() {
                 println!(
                     "[{label}] trace#{n} start=[{:.3},{:.3},{:.3}] end=[{:.3},{:.3},{:.3}] \
                      frac={:.6} endz={:.3} normalz={:.3} ent={} mask=0x{:x} call_pc={}",
-                    f(start), f(start + 4), f(start + 8),
-                    f(end), f(end + 4), f(end + 8),
-                    f(dst + 8), f(dst + 20), f(dst + 32),
+                    f(start),
+                    f(start + 4),
+                    f(start + 8),
+                    f(end),
+                    f(end + 4),
+                    f(end + 8),
+                    f(dst + 8),
+                    f(dst + 20),
+                    f(dst + 32),
                     mem.load4(dst + 48),
                     a.get(7).copied().unwrap_or(0),
                     last_call_pc_syscall.get(),
@@ -206,7 +223,7 @@ fn main() {
         let last_call_pc_hook = last_call_pc.clone();
         let last_trace_dst_hook = last_trace_dst.clone();
         let steps1: Rc<Cell<usize>> = Rc::new(Cell::new(0));
-        let steps1_hook = steps1.clone();
+        let _steps1_hook = steps1.clone();
         let mut emu = Emu::new(&d.insns, q)
             .with_syscall(trace_syscall)
             .with_step_hook(Box::new(move |e: &mut Emu, pc: usize| {
@@ -312,7 +329,10 @@ fn main() {
                 hc.entity_tokens.borrow_mut().reset();
             }
             let r = emu.call(start, &[cmd.0, cmd.1, cmd.2, cmd.3]);
-            println!("  cmd {ci} msg {} -> {:?} steps={}", cmd.0, r, emu.stats.steps);
+            println!(
+                "  cmd {ci} msg {} -> {:?} steps={}",
+                cmd.0, r, emu.stats.steps
+            );
             let m = emu.mem();
             let ent0 = 220232i32;
             let cl = m.load4(ent0 + 516);

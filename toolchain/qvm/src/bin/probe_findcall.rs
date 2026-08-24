@@ -3,8 +3,8 @@
 //! CONST matching a given data address. Useful when probe_findconst misses
 //! addresses built via ADD/arithmetic - this scans raw operands directly.
 //! Usage: probe_findcall <path.qvm> <call_operand> <nearby_const_value> [window]
-use qvm::{disassemble, load};
 use qvm::Opcode;
+use qvm::{disassemble, load};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -18,7 +18,11 @@ fn main() {
         let mut i = 0usize;
         while i < d.insns.len() {
             let ins = &d.insns[i];
-            if ins.op == Opcode::Call && i > 0 && d.insns[i-1].op == Opcode::Const && d.insns[i-1].operand == Some(call_op) {
+            if ins.op == Opcode::Call
+                && i > 0
+                && d.insns[i - 1].op == Opcode::Const
+                && d.insns[i - 1].operand == Some(call_op)
+            {
                 // find the preceding ARG's CONST (the string/int arg pushed just before this one)
                 let mut consts = vec![];
                 let lo = i.saturating_sub(30);
@@ -29,19 +33,34 @@ fn main() {
                 }
                 let raw_str = |addr: i32| -> Option<String> {
                     let a = addr as usize;
-                    if a >= q.data.len() { return None; }
+                    if a >= q.data.len() {
+                        return None;
+                    }
                     let rest = &q.data[a..];
                     let end = rest.iter().position(|&b| b == 0)?;
                     let s = &rest[..end.min(200)];
-                    if s.len() < 2 || !s.iter().all(|&b| b == b'\n' || b == b'\r' || b == b'\t' || (b >= 0x20 && b < 0x7f)) {
+                    if s.len() < 2
+                        || !s.iter().all(|&b| {
+                            b == b'\n' || b == b'\r' || b == b'\t' || (0x20..0x7f).contains(&b)
+                        })
+                    {
                         return None;
                     }
                     Some(String::from_utf8_lossy(s).into_owned())
                 };
-                let strs: Vec<String> = consts.iter().rev()
+                let strs: Vec<String> = consts
+                    .iter()
+                    .rev()
                     .filter_map(|&v| q.string_at(v).or_else(|| raw_str(v)))
                     .collect();
-                println!("insn {} (addr 0x{:x}): CALL {} consts={:?} strs={:?}", i, i*4, call_op, consts, strs);
+                println!(
+                    "insn {} (addr 0x{:x}): CALL {} consts={:?} strs={:?}",
+                    i,
+                    i * 4,
+                    call_op,
+                    consts,
+                    strs
+                );
             }
             i += ins.size as usize;
         }
@@ -65,7 +84,15 @@ fn main() {
                 }
             }
             if found {
-                println!("CALL {} at insn {} (addr 0x{:x}) with nearby CONST {} in window [{}..{})", call_op, i, i * 4, want_const, lo, i);
+                println!(
+                    "CALL {} at insn {} (addr 0x{:x}) with nearby CONST {} in window [{}..{})",
+                    call_op,
+                    i,
+                    i * 4,
+                    want_const,
+                    lo,
+                    i
+                );
                 for j in lo..=i {
                     println!("  {}: {}", j, d.insns[j]);
                 }

@@ -7,8 +7,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use qvm::probe_common::{TrapLog, make_handler};
-use qvm::{Emu, build_functions, disassemble, load};
+use qvm::probe_common::{make_handler, TrapLog};
+use qvm::{build_functions, disassemble, load, Emu};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();

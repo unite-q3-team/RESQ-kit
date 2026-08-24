@@ -22,12 +22,14 @@ pub mod structure;
 pub mod traps;
 pub mod types;
 
-pub use cfg::{CFG, Block, build_all, build_cfg, build_functions};
-pub use decompile::{Expr, Function, Stmt, Terminator, decompile_function, fmt_function, reachable_blocks};
-pub use structure::{CaseKind, Elem, Structure, fmt_readable, fmt_structured};
-pub use disasm::{DisasmError, Disassembly, Insn, disassemble};
+pub use cfg::{build_all, build_cfg, build_functions, Block, CFG};
+pub use decompile::{
+    decompile_function, fmt_function, reachable_blocks, Expr, Function, Stmt, Terminator,
+};
+pub use disasm::{disassemble, DisasmError, Disassembly, Insn};
 pub use emu::{Emu, EmuError, Memory, Stats, SyscallHandler};
-pub use loader::{Qvm, QvmError, load};
+pub use loader::{load, Qvm, QvmError};
 pub use names::{index, load_map, parse_map};
-pub use opcodes::{Opcode, instr_length};
+pub use opcodes::{instr_length, Opcode};
+pub use structure::{fmt_readable, fmt_structured, CaseKind, Elem, Structure};
 pub use traps::trap_name;

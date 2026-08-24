@@ -8,8 +8,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use qvm::probe_common::{TrapLog, make_handler};
-use qvm::{Emu, build_functions, disassemble, load};
+use qvm::probe_common::make_handler;
+use qvm::{build_functions, disassemble, load, Emu};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -18,16 +18,72 @@ fn main() {
         std::process::exit(2);
     }
     let cmds = [
-        "hudstyle", "hudnext", "hudprev", "addstr", "+vstr", "-vstr", "+fire", "-fire",
-        "clientversion", "credits", "motd", "myname", "testgun", "testmodel", "nextframe",
-        "prevframe", "nextskin", "prevskin", "viewpos", "+scores", "-scores", "+wstats",
-        "-wstats", "+zoom", "-zoom", "sizeup", "sizedown", "weapnext", "weapprev", "weapon",
-        "tell_target", "tell_attacker", "tcmd", "startOrbit", "loaddeferred", "currenttime",
-        "+modif1", "+modif2", "+modif3", "+modif4", "+modif5", "-modif1", "-modif2", "-modif3",
-        "-modif4", "-modif5", "+action", "-action", "menuleft", "menuright", "menu",
-        "cg_dynamicmem", "addpos", "decaladd", "decaldec", "decaldisable", "decaldump",
-        "decaledit", "decalenable", "decalgfxnext", "decalgfxprev", "decalinc", "decalnext",
-        "decalprev", "decalrotclock", "decalrotcounter",
+        "hudstyle",
+        "hudnext",
+        "hudprev",
+        "addstr",
+        "+vstr",
+        "-vstr",
+        "+fire",
+        "-fire",
+        "clientversion",
+        "credits",
+        "motd",
+        "myname",
+        "testgun",
+        "testmodel",
+        "nextframe",
+        "prevframe",
+        "nextskin",
+        "prevskin",
+        "viewpos",
+        "+scores",
+        "-scores",
+        "+wstats",
+        "-wstats",
+        "+zoom",
+        "-zoom",
+        "sizeup",
+        "sizedown",
+        "weapnext",
+        "weapprev",
+        "weapon",
+        "tell_target",
+        "tell_attacker",
+        "tcmd",
+        "startOrbit",
+        "loaddeferred",
+        "currenttime",
+        "+modif1",
+        "+modif2",
+        "+modif3",
+        "+modif4",
+        "+modif5",
+        "-modif1",
+        "-modif2",
+        "-modif3",
+        "-modif4",
+        "-modif5",
+        "+action",
+        "-action",
+        "menuleft",
+        "menuright",
+        "menu",
+        "cg_dynamicmem",
+        "addpos",
+        "decaladd",
+        "decaldec",
+        "decaldisable",
+        "decaldump",
+        "decaledit",
+        "decalenable",
+        "decalgfxnext",
+        "decalgfxprev",
+        "decalinc",
+        "decalnext",
+        "decalprev",
+        "decalrotclock",
+        "decalrotcounter",
     ];
 
     let q1 = Box::leak(Box::new(load(&a[0]).expect("load orig")));
@@ -62,16 +118,16 @@ fn main() {
         lo
     }
 
-    let mut s1 = Emu::new(
-        &d1.insns,
-        q1,
-    )
-    .with_syscall(make_handler(q1.module, 0, Rc::new(RefCell::new(Vec::new()))));
-    let mut s2 = Emu::new(
-        &d2.insns,
-        q2,
-    )
-    .with_syscall(make_handler(q2.module, 0, Rc::new(RefCell::new(Vec::new()))));
+    let mut s1 = Emu::new(&d1.insns, q1).with_syscall(make_handler(
+        q1.module,
+        0,
+        Rc::new(RefCell::new(Vec::new())),
+    ));
+    let mut s2 = Emu::new(&d2.insns, q2).with_syscall(make_handler(
+        q2.module,
+        0,
+        Rc::new(RefCell::new(Vec::new())),
+    ));
     for (label, s, start) in [("orig", &mut s1, start1), ("rebld", &mut s2, start2)] {
         s.set_max_steps(20_000_000);
         let r = s.call(start, &[0, 100, 123, 0]);

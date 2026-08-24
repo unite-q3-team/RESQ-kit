@@ -54,10 +54,14 @@ pub fn image_off(vmoff: usize) -> Option<usize> {
 const SCALAR_TABLE: &[(usize, &str)] = &[];
 
 fn level_scalar(off: usize) -> Option<&'static str> {
-    SCALAR_TABLE.iter().find(|(o, _)| *o == off).map(|(_, n)| *n)
+    SCALAR_TABLE
+        .iter()
+        .find(|(o, _)| *o == off)
+        .map(|(_, n)| *n)
 }
 
 /// `#define` name for an exact scalar BSS cell, if we have one.
+#[allow(clippy::absurd_extreme_comparisons)] // template constants start at 0
 pub fn scalar_macro(vmoff: usize) -> Option<&'static str> {
     if vmoff < LEVEL_BASE || vmoff >= LEVEL_BASE + LEVEL_SIZE {
         return None;
@@ -159,7 +163,10 @@ pub fn field_addend_for(kind: Option<PtrKind>, n: i32) -> Option<String> {
 /// Known `loc_0[N]` names inside a named function (macros over the frame blob).
 /// FILL IN per module. Example row: `("ClientSpawn", 104) => "spot"`.
 pub fn fn_local_slot(fn_name: &str, off: usize) -> Option<&'static str> {
-    fn_local_slots(fn_name).iter().find(|(o, _)| *o == off).map(|(_, n)| *n)
+    fn_local_slots(fn_name)
+        .iter()
+        .find(|(o, _)| *o == off)
+        .map(|(_, n)| *n)
 }
 
 pub fn fn_local_slots(fn_name: &str) -> &'static [(usize, &'static str)] {
@@ -171,7 +178,7 @@ pub fn fn_local_slots(fn_name: &str) -> &'static [(usize, &'static str)] {
 }
 
 /// Per-function local-slot names: `(function, &[(offset, name)])`.
-const LOCAL_SLOTS: &[(&str, &[(usize, &'static str)])] = &[];
+const LOCAL_SLOTS: &[(&str, &[(usize, &str)])] = &[];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PtrKind {
@@ -226,8 +233,14 @@ mod tests {
         assert_eq!(comment(220_232 + 520), None);
         assert_eq!(stride_macro(824), None);
         assert_eq!(overlay_ptr_field(Some(PtrKind::Entity), 520), None);
-        assert_eq!(overlay_ptr_field_for(OverlayMod::CGame, Some(PtrKind::Entity), 92), None);
-        assert_eq!(overlay_ptr_field_for(OverlayMod::Ui, Some(PtrKind::Menu), 44), None);
+        assert_eq!(
+            overlay_ptr_field_for(OverlayMod::CGame, Some(PtrKind::Entity), 92),
+            None
+        );
+        assert_eq!(
+            overlay_ptr_field_for(OverlayMod::Ui, Some(PtrKind::Menu), 44),
+            None
+        );
         assert_eq!(field_addend_comment(520), None);
         assert_eq!(field_addend_for(Some(PtrKind::Client), 20), None);
         assert_eq!(fn_local_slot("ClientSpawn", 104), None);

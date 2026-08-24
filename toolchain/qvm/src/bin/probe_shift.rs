@@ -22,7 +22,13 @@ fn main() {
         }
         let printable: String = bytes
             .iter()
-            .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+            .map(|&b| {
+                if (0x20..0x7f).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
         println!("off {o}: {bytes:02x?}  '{printable}'");
     }

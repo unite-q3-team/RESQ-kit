@@ -116,7 +116,7 @@ fn collect_inline_cvars(
         let f = decompile_function(d, cfg, frame, data);
         let mut rec = |e: &Expr| {
             if let Expr::Trap(3, args) = e {
-                if let Some(Expr::Const(slot)) = args.get(0) {
+                if let Some(Expr::Const(slot)) = args.first() {
                     if *slot > 0 && seen.insert(*slot as usize) {
                         let name = match args.get(1) {
                             Some(Expr::Const(c)) => q
@@ -220,6 +220,7 @@ fn gentity_field(off: usize) -> Option<&'static str> {
 }
 
 /// Classify a BSS address into a human label (region + offset).
+#[allow(clippy::absurd_extreme_comparisons, clippy::impossible_comparisons)] // template constants start at 0
 fn classify_bss(slots: &[CvarSlot], a: usize) -> String {
     if let Some(s) = cvar_containing(slots, a) {
         let off = a - s.addr;
@@ -239,7 +240,7 @@ fn classify_bss(slots: &[CvarSlot], a: usize) -> String {
         }
     } else if GCLIENTS_END > GCLIENTS_BASE && a >= GCLIENTS_BASE && a < GCLIENTS_END {
         format!("g_clients +0x{:x}", a - GCLIENTS_BASE)
-    } else if let Some((base, end, label)) = ZONES.iter().find(|(b, e, _)| a >= *b && a < *e) {
+    } else if let Some((base, _end, label)) = ZONES.iter().find(|(b, e, _)| a >= *b && a < *e) {
         format!("{label} +0x{:x}", a - base)
     } else {
         format!("bss-unknown 0x{a:06x}")
@@ -316,7 +317,10 @@ impl<'a> Collector<'a> {
             self.unknown += 1;
             return;
         }
-        self.access.entry(addr).or_default().note(size, is_load, self.func);
+        self.access
+            .entry(addr)
+            .or_default()
+            .note(size, is_load, self.func);
     }
 
     fn note_copy(&mut self, dest: usize, src: usize) {
@@ -369,17 +373,15 @@ impl<'a> Collector<'a> {
                 }
                 self.walk_expr(value);
             }
-            Stmt::BlockCopy { dest, src, .. } => {
-                match (const_addr(dest), const_addr(src)) {
-                    (Some(d), Some(s)) => self.note_copy(d, s),
-                    (Some(d), None) => self.note_copy(d, 0),
-                    (None, Some(s)) => self.note_copy(0, s),
-                    (None, None) => {
-                        self.walk_expr(dest);
-                        self.walk_expr(src);
-                    }
+            Stmt::BlockCopy { dest, src, .. } => match (const_addr(dest), const_addr(src)) {
+                (Some(d), Some(s)) => self.note_copy(d, s),
+                (Some(d), None) => self.note_copy(d, 0),
+                (None, Some(s)) => self.note_copy(0, s),
+                (None, None) => {
+                    self.walk_expr(dest);
+                    self.walk_expr(src);
                 }
-            }
+            },
         }
     }
 
@@ -472,7 +474,12 @@ fn main() {
 
     let mut cvars = parse_cvar_table(&q);
     let inline = collect_inline_cvars(&q, &d, &cfgs, &data);
-    eprintln!("cvarTable: {} table entries + {} inline = {}", cvars.len(), inline.len(), cvars.len() + inline.len());
+    eprintln!(
+        "cvarTable: {} table entries + {} inline = {}",
+        cvars.len(),
+        inline.len(),
+        cvars.len() + inline.len()
+    );
     let mut seen_slots: BTreeSet<usize> = cvars.iter().map(|c| c.addr).collect();
     for c in inline {
         if seen_slots.insert(c.addr) {
@@ -491,7 +498,7 @@ fn main() {
     let bss_addrs: BTreeSet<usize> = col.access.keys().copied().filter(|a| *a >= dll).collect();
 
     let mut out = String::new();
-    out.push_str(&format!("// types.txt — data-segment typing (stage C1 collect)\n"));
+    out.push_str("// types.txt — data-segment typing (stage C1 collect)\n");
     out.push_str(&format!("// qvm: {path}\n"));
     out.push_str(&format!(
         "// data_length={dl} lit_length={ll} data+lit=0x{dll:X}\n"
@@ -591,14 +598,20 @@ fn main() {
     let total_bss = bss_addrs.len();
     out.push_str("== BSS coverage summary ==\n");
     for (r, n) in &region_counts {
-        out.push_str(&format!("  {r:<12} {n:>4}  ({:.1}%)\n", 100.0 * *n as f64 / total_bss.max(1) as f64));
+        out.push_str(&format!(
+            "  {r:<12} {n:>4}  ({:.1}%)\n",
+            100.0 * *n as f64 / total_bss.max(1) as f64
+        ));
     }
     let unknown_n = groups
         .keys()
         .filter(|k| k.starts_with("bss-unknown"))
         .map(|k| groups[k].len())
         .sum::<usize>();
-    out.push_str(&format!("  bss-unknown {unknown_n}  ({:.1}%)\n", 100.0 * unknown_n as f64 / total_bss.max(1) as f64));
+    out.push_str(&format!(
+        "  bss-unknown {unknown_n}  ({:.1}%)\n",
+        100.0 * unknown_n as f64 / total_bss.max(1) as f64
+    ));
 
     std::fs::write(&out_path, &out).expect("write");
     println!(

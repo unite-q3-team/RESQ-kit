@@ -1,8 +1,12 @@
-use qvm::{build_functions, build_cfg, disassemble, load};
+use qvm::{build_cfg, build_functions, disassemble, load};
 
 fn main() {
     let path = std::env::args().nth(1).unwrap();
-    let fnidx: usize = std::env::args().nth(2).unwrap_or("0".into()).parse().unwrap();
+    let fnidx: usize = std::env::args()
+        .nth(2)
+        .unwrap_or("0".into())
+        .parse()
+        .unwrap();
     let q = load(&path).expect("load qvm");
     let d = disassemble(&q).expect("disasm");
     let ranges = build_functions(&d);

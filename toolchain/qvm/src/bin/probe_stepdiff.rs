@@ -14,19 +14,19 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use qvm::probe_common::{TrapLog, make_handler};
-use qvm::{Emu, build_functions, disassemble, load};
+use qvm::probe_common::{make_handler, TrapLog};
+use qvm::{build_functions, disassemble, load, Emu};
 
 const SEQ: &[(i32, i32, i32, i32)] = &[
-    (0, 100, 123, 0),   // GAME_INIT
-    (2, 0, 1, 0),       // GAME_CLIENT_CONNECT
-    (3, 0, 0, 0),       // GAME_CLIENT_BEGIN
-    (4, 0, 0, 0),       // GAME_CLIENT_USERINFO_CHANGED
-    (7, 0, 0, 0),       // GAME_CLIENT_THINK
-    (8, 1000, 0, 0),    // GAME_RUN_FRAME
-    (8, 1100, 0, 0),    // GAME_RUN_FRAME
-    (5, 0, 0, 0),       // GAME_CLIENT_DISCONNECT  <-- focus
-    (1, 0, 0, 0),       // GAME_SHUTDOWN
+    (0, 100, 123, 0), // GAME_INIT
+    (2, 0, 1, 0),     // GAME_CLIENT_CONNECT
+    (3, 0, 0, 0),     // GAME_CLIENT_BEGIN
+    (4, 0, 0, 0),     // GAME_CLIENT_USERINFO_CHANGED
+    (7, 0, 0, 0),     // GAME_CLIENT_THINK
+    (8, 1000, 0, 0),  // GAME_RUN_FRAME
+    (8, 1100, 0, 0),  // GAME_RUN_FRAME
+    (5, 0, 0, 0),     // GAME_CLIENT_DISCONNECT  <-- focus
+    (1, 0, 0, 0),     // GAME_SHUTDOWN
 ];
 
 fn fn_of(ranges: &[(usize, usize)], idx: usize) -> usize {
@@ -57,8 +57,8 @@ fn main() {
     let d1 = Box::leak(Box::new(disassemble(&q1).expect("disasm orig")));
     let d2 = Box::leak(Box::new(disassemble(&q2).expect("disasm rebuilt")));
 
-    let ranges1 = build_functions(&d1);
-    let ranges2 = build_functions(&d2);
+    let ranges1 = build_functions(d1);
+    let ranges2 = build_functions(d2);
     let (start1, start2) = (ranges1[0].0, ranges2[0].0);
 
     // attach names from `fn[<idx>] <name>` lines by entry insn of each function
@@ -70,7 +70,11 @@ fn main() {
             let (Some(idx), Some(name)) = (it.next(), it.next()) else {
                 continue;
             };
-            if let Ok(i) = idx.trim_start_matches("fn[").trim_end_matches(']').parse::<usize>() {
+            if let Ok(i) = idx
+                .trim_start_matches("fn[")
+                .trim_end_matches(']')
+                .parse::<usize>()
+            {
                 if names.len() <= i {
                     names.resize(i + 1, String::new());
                 }
@@ -96,7 +100,9 @@ fn main() {
             let (Some(a0), Some(a1), Some(name)) = (it.next(), it.next(), it.next()) else {
                 continue;
             };
-            let Ok(insn) = usize::from_str_radix(a1, 16) else { continue };
+            let Ok(insn) = usize::from_str_radix(a1, 16) else {
+                continue;
+            };
             if a0 != "0" {
                 continue;
             }
@@ -105,12 +111,17 @@ fn main() {
                 mapped += 1;
             }
         }
-        eprintln!("stepdiff: mapped {mapped}/{} rebuilt functions from {mp}", ranges2.len());
+        eprintln!(
+            "stepdiff: mapped {mapped}/{} rebuilt functions from {mp}",
+            ranges2.len()
+        );
     }
 
     fn name_of(q: &qvm::Qvm, ranges: &[(usize, usize)], idx: usize) -> String {
         let (s, _) = ranges[idx];
-        q.name_for_fn(s).map(|n| n.to_string()).unwrap_or_else(|| format!("fn[{idx}]"))
+        q.name_for_fn(s)
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| format!("fn[{idx}]"))
     }
 
     let logs1: Rc<RefCell<Vec<TrapLog>>> = Rc::new(RefCell::new(Vec::new()));
@@ -164,30 +175,52 @@ fn main() {
         }
     }
 
-    println!("\nDISCONNECT: orig {} steps / {} traps || rebld {} steps / {} traps", dis1.len(), t1.len(), dis2.len(), t2.len());
+    println!(
+        "\nDISCONNECT: orig {} steps / {} traps || rebld {} steps / {} traps",
+        dis1.len(),
+        t1.len(),
+        dis2.len(),
+        t2.len()
+    );
 
     // ---- dump the tail after the LAST trap of DISCONNECT on both sides ----
     // (traps match per seqdiff, so the divergence is in the return path)
-    let dump_tail = |pcs: &[usize], d: &qvm::disasm::Disassembly, ranges: &[(usize, usize)], q: &qvm::Qvm, traps: &[usize], label: &str| {
+    let dump_tail = |pcs: &[usize],
+                     d: &qvm::disasm::Disassembly,
+                     ranges: &[(usize, usize)],
+                     q: &qvm::Qvm,
+                     traps: &[usize],
+                     label: &str| {
         if traps.is_empty() {
             println!("\n{label}: no traps; showing first 60 steps:");
             let n = pcs.len().min(60);
             for (j, &x) in pcs.iter().enumerate().take(n) {
                 let f = fn_of(ranges, x);
-                println!("  step {j:>6} fn[{f}]{:<18} {}", name_of(q, ranges, f), d.insns[x]);
+                println!(
+                    "  step {j:>6} fn[{f}]{:<18} {}",
+                    name_of(q, ranges, f),
+                    d.insns[x]
+                );
             }
             return;
         }
         let last_trap = traps[traps.len() - 1];
         let pos = pcs.iter().position(|&x| x == last_trap).unwrap_or(0);
-        println!("\n{label}: after last trap (step {pos}/{}, trap insn #{last_trap}):", pcs.len());
+        println!(
+            "\n{label}: after last trap (step {pos}/{}, trap insn #{last_trap}):",
+            pcs.len()
+        );
         for (j, &x) in pcs.iter().enumerate().skip(pos).take(80) {
             let f = fn_of(ranges, x);
-            println!("  step {j:>6} fn[{f}]{:<18} {}", name_of(q, ranges, f), d.insns[x]);
+            println!(
+                "  step {j:>6} fn[{f}]{:<18} {}",
+                name_of(q, ranges, f),
+                d.insns[x]
+            );
         }
     };
-    dump_tail(&dis1, &d1, &ranges1, &q1, &t1, "orig ");
-    dump_tail(&dis2, &d2, &ranges2, &q2, &t2, "rebld");
+    dump_tail(&dis1, d1, &ranges1, &q1, &t1, "orig ");
+    dump_tail(&dis2, d2, &ranges2, &q2, &t2, "rebld");
 
     // ---- runaway cycle in the rebuilt post-last-trap tail ----
     if !t2.is_empty() {

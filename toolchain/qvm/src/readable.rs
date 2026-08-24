@@ -9,9 +9,8 @@ use std::collections::HashMap;
 use crate::decompile::{Expr, Function, LoadSize, Stmt, Terminator};
 use crate::loader::Qvm;
 use crate::types::{
-    OverlayMod, PtrKind, comment, overlay_ptr_field_for, scalar_macro, stride_macro,
-    GCLIENTS_BASE, GCLIENTS_END, GCLIENT_SIZE, GENTITIES_BASE, GENTITIES_END, GENTITY_SIZE,
-    LEVEL_BASE,
+    comment, overlay_ptr_field_for, scalar_macro, stride_macro, OverlayMod, PtrKind, GCLIENTS_BASE,
+    GCLIENTS_END, GCLIENT_SIZE, GENTITIES_BASE, GENTITIES_END, GENTITY_SIZE, LEVEL_BASE,
 };
 
 /// Proven gentity pointer fields (not ints). Used to print `NULL` / drop `(int)`.
@@ -190,10 +189,10 @@ impl Ctx {
             _ => return None,
         };
         if let Some(m) = stride_macro(n) {
-            if n == GENTITY_SIZE as i32 {
-                if self.local_kind(base).is_some_and(|k| k == PtrKind::Entity) {
-                    return Some(format!("{} + 1", self.expr(f, q, base)));
-                }
+            if n == GENTITY_SIZE as i32
+                && self.local_kind(base).is_some_and(|k| k == PtrKind::Entity)
+            {
+                return Some(format!("{} + 1", self.expr(f, q, base)));
             }
             return Some(format!("{} + {m}", self.expr(f, q, base)));
         }
@@ -285,7 +284,9 @@ impl Ctx {
             return format!("(int)&{}", name.replacen('_', ".", 1));
         }
         if let Some(s) = comment(c as usize) {
-            if s.starts_with("g_entities[") || s.starts_with("g_clients[") || s.starts_with("level.")
+            if s.starts_with("g_entities[")
+                || s.starts_with("g_clients[")
+                || s.starts_with("level.")
             {
                 return format!("(int)&{s}");
             }
@@ -307,8 +308,8 @@ impl Ctx {
         let ll = q.lit_length as usize;
         if addr < dl {
             match size {
-                LoadSize::I4 if addr % 4 == 0 => format!("data_i32[{}]", addr / 4),
-                LoadSize::I2 if addr % 2 == 0 => format!("data_i16[{}]", addr / 2),
+                LoadSize::I4 if addr.is_multiple_of(4) => format!("data_i32[{}]", addr / 4),
+                LoadSize::I2 if addr.is_multiple_of(2) => format!("data_i16[{}]", addr / 2),
                 _ => format!("data_i8[{addr}]"),
             }
         } else if addr < dl + ll {
@@ -326,24 +327,27 @@ fn flag_name(n: i32) -> Option<&'static str> {
     }
 }
 
+#[allow(clippy::absurd_extreme_comparisons, clippy::impossible_comparisons)] // template constants start at 0
 fn entity_addr(c: i32) -> Option<String> {
     if c < 0 || GENTITY_SIZE == 0 {
         return None;
     }
     let u = c as usize;
-    if u >= GENTITIES_BASE && u < GENTITIES_END && (u - GENTITIES_BASE) % GENTITY_SIZE == 0 {
+    if u >= GENTITIES_BASE && u < GENTITIES_END && (u - GENTITIES_BASE).is_multiple_of(GENTITY_SIZE)
+    {
         let i = (u - GENTITIES_BASE) / GENTITY_SIZE;
         return Some(format!("&g_entities[{i}]"));
     }
     None
 }
 
+#[allow(clippy::absurd_extreme_comparisons, clippy::impossible_comparisons)] // template constants start at 0
 fn client_addr(c: i32) -> Option<String> {
     if c < 0 || GCLIENT_SIZE == 0 {
         return None;
     }
     let u = c as usize;
-    if u >= GCLIENTS_BASE && u < GCLIENTS_END && (u - GCLIENTS_BASE) % GCLIENT_SIZE == 0 {
+    if u >= GCLIENTS_BASE && u < GCLIENTS_END && (u - GCLIENTS_BASE).is_multiple_of(GCLIENT_SIZE) {
         let i = (u - GCLIENTS_BASE) / GCLIENT_SIZE;
         return Some(format!("&g_clients[{i}]"));
     }
@@ -388,7 +392,7 @@ fn stack_name(frame: i32, off: usize) -> String {
     let f = frame as usize;
     if off < f {
         format!("loc_{off}")
-    } else if off >= f + 8 && (off - f - 8) % 4 == 0 {
+    } else if off >= f + 8 && (off - f - 8).is_multiple_of(4) {
         format!("arg_{}", (off - f - 8) / 4)
     } else {
         format!("sp_{off}")
@@ -413,10 +417,7 @@ fn crate_apply_known(fn_name: &str, kind: &mut HashMap<usize, PtrKind>) {
     }
 }
 
-fn local_names(
-    fn_name: &str,
-    ptr_kind: &HashMap<usize, PtrKind>,
-) -> HashMap<usize, String> {
+fn local_names(fn_name: &str, ptr_kind: &HashMap<usize, PtrKind>) -> HashMap<usize, String> {
     let mut out: HashMap<usize, String> = HashMap::new();
     let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
     for &(off, name) in crate::types::fn_local_slots(fn_name) {
@@ -472,13 +473,14 @@ fn add_const_eq(e: &Expr, n: i32) -> bool {
 
 fn infer_ptr_kinds(f: &Function, overlay: OverlayMod) -> HashMap<usize, PtrKind> {
     let mut kind: HashMap<usize, PtrKind> = HashMap::new();
-    let mark = |map: &mut HashMap<usize, PtrKind>, off: usize, k: PtrKind| {
-        match (map.get(&off).copied(), k) {
-            (Some(PtrKind::Client), PtrKind::Entity) => {}
-            (Some(PtrKind::Menu), _) => {}
-            _ => {
-                map.insert(off, k);
-            }
+    let mark = |map: &mut HashMap<usize, PtrKind>, off: usize, k: PtrKind| match (
+        map.get(&off).copied(),
+        k,
+    ) {
+        (Some(PtrKind::Client), PtrKind::Entity) => {}
+        (Some(PtrKind::Menu), _) => {}
+        _ => {
+            map.insert(off, k);
         }
     };
     let local_of = |e: &Expr| -> Option<usize> {
@@ -505,7 +507,21 @@ fn infer_ptr_kinds(f: &Function, overlay: OverlayMod) -> HashMap<usize, PtrKind>
                     match overlay {
                         OverlayMod::Game => {
                             if n == GENTITY_SIZE as i32
-                                || matches!(u, 424 | 516 | 520 | 524 | 528 | 532 | 536 | 656 | 660 | 780 | 784 | 808 | 820)
+                                || matches!(
+                                    u,
+                                    424 | 516
+                                        | 520
+                                        | 524
+                                        | 528
+                                        | 532
+                                        | 536
+                                        | 656
+                                        | 660
+                                        | 780
+                                        | 784
+                                        | 808
+                                        | 820
+                                )
                             {
                                 mark(kind, off, PtrKind::Entity);
                             } else if n == GCLIENT_SIZE as i32 || matches!(u, 468 | 944) {
@@ -575,8 +591,7 @@ fn infer_ptr_kinds(f: &Function, overlay: OverlayMod) -> HashMap<usize, PtrKind>
                                     mark(&mut kind, *dst, PtrKind::Entity);
                                 }
                                 Expr::Const(n)
-                                    if overlay == OverlayMod::Game
-                                        && entity_addr(*n).is_some() =>
+                                    if overlay == OverlayMod::Game && entity_addr(*n).is_some() =>
                                 {
                                     mark(&mut kind, *dst, PtrKind::Entity);
                                 }
@@ -619,9 +634,7 @@ pub fn store_rhs(ctx: &Ctx, f: &Function, q: &Qvm, addr: &Expr, value: &Expr) ->
         .is_some_and(|f| ENT_PTR_FIELDS.contains(&f));
     match value {
         Expr::Const(0) if ptr_field => "NULL".into(),
-        Expr::Local { off, .. } if ctx.ptr_kind.get(off).is_some() => {
-            ctx.local_name(f.frame, *off)
-        }
+        Expr::Local { off, .. } if ctx.ptr_kind.contains_key(off) => ctx.local_name(f.frame, *off),
         Expr::Const(_) if ptr_field => ctx.expr(f, q, value),
         _ => ctx.expr(f, q, value),
     }

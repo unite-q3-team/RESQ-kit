@@ -47,7 +47,12 @@ fn main() {
 
     if args.len() >= 3 {
         std::fs::write(&args[2], &out).expect("write map");
-        println!("wrote {} ({} named of {} functions)", args[2], total, ranges.len());
+        println!(
+            "wrote {} ({} named of {} functions)",
+            args[2],
+            total,
+            ranges.len()
+        );
     } else {
         print!("{out}");
     }

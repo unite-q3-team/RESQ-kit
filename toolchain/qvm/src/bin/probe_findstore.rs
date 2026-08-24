@@ -1,7 +1,7 @@
 //! Scan a QVM for stores to a given address (via CONST <addr>; ...; STORE4)
 //! to find bytecode stores the decompiler dropped.
 
-use qvm::{Opcode, build_functions, disassemble, load};
+use qvm::{build_functions, disassemble, load, Opcode};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -49,7 +49,10 @@ fn main() {
                 j += 1;
             }
             if j >= i + 12 {
-                println!("const {addr} at insn {i} (fn[{}]) with no STORE4 nearby", fn_of[i]);
+                println!(
+                    "const {addr} at insn {i} (fn[{}]) with no STORE4 nearby",
+                    fn_of[i]
+                );
             }
         }
         i += 1;

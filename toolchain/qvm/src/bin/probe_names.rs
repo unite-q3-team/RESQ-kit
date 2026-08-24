@@ -40,7 +40,13 @@ fn main() {
     );
 
     // dump a machine-readable names table for later use
-    let out = format!("{}.names", std::path::Path::new(qvm).file_stem().unwrap().to_string_lossy());
+    let out = format!(
+        "{}.names",
+        std::path::Path::new(qvm)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+    );
     let mut w = String::new();
     for (fi, &(start, _end)) in ranges.iter().enumerate() {
         if let Some(name) = idx.get(&start) {

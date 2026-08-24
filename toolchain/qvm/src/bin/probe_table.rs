@@ -1,6 +1,9 @@
-﻿fn main() {
+fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    if a.is_empty() { eprintln!("usage: probe_table <qvm>"); std::process::exit(2); }
+    if a.is_empty() {
+        eprintln!("usage: probe_table <qvm>");
+        std::process::exit(2);
+    }
     let q = qvm::load(&a[0]).unwrap();
     let d = qvm::disassemble(&q).unwrap();
     let cfgs = qvm::build_all(&d, &q);

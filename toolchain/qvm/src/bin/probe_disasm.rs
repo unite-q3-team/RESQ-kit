@@ -16,7 +16,10 @@ fn main() {
     println!("functions: {}", ranges.len());
     let (start, end) = ranges[which];
     println!("fn[{which}] insns {start}..{end}");
-    let lo = args.get(2).and_then(|s| s.parse::<usize>().ok()).unwrap_or(start);
+    let lo = args
+        .get(2)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(start);
     let hi = args
         .get(3)
         .and_then(|s| s.parse::<usize>().ok())
@@ -32,10 +35,19 @@ fn main() {
     }
 }
 
-trait DataWord { fn data_word(&self, va: usize) -> i32; }
+trait DataWord {
+    fn data_word(&self, va: usize) -> i32;
+}
 impl DataWord for qvm::Qvm {
     fn data_word(&self, va: usize) -> i32 {
-        if va + 4 > self.data.len() { return 0; }
-        i32::from_le_bytes([self.data[va], self.data[va+1], self.data[va+2], self.data[va+3]])
+        if va + 4 > self.data.len() {
+            return 0;
+        }
+        i32::from_le_bytes([
+            self.data[va],
+            self.data[va + 1],
+            self.data[va + 2],
+            self.data[va + 3],
+        ])
     }
 }

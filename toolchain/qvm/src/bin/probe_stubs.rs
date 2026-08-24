@@ -1,4 +1,6 @@
-use qvm::{CaseKind, Elem, Structure, Terminator, build_all, decompile_function, disassemble, load};
+use qvm::{
+    build_all, decompile_function, disassemble, load, CaseKind, Elem, Structure, Terminator,
+};
 use std::collections::HashSet;
 
 fn collect(elems: &[Elem], s: &Structure, residual: &mut HashSet<usize>) {
@@ -80,6 +82,12 @@ fn main() {
     eprintln!("residual: {:?}", residual.iter().collect::<Vec<_>>());
     for &bi in &leftover {
         let b = &f.blocks[bi];
-        eprintln!("  L{} term={:?} body={:?} in_residual={}", b.start, b.term, b.body, residual.contains(&bi));
+        eprintln!(
+            "  L{} term={:?} body={:?} in_residual={}",
+            b.start,
+            b.term,
+            b.body,
+            residual.contains(&bi)
+        );
     }
 }

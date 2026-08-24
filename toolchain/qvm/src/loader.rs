@@ -121,7 +121,11 @@ impl Qvm {
         let rest = &self.lit[off..];
         let end = rest.iter().position(|&b| b == 0)?;
         let s = &rest[..end];
-        if s.is_empty() || !s.iter().all(|&b| b == b'\n' || b == b'\r' || b == b'\t' || (b >= 0x20 && b < 0x7f)) {
+        if s.is_empty()
+            || !s
+                .iter()
+                .all(|&b| b == b'\n' || b == b'\r' || b == b'\t' || (0x20..0x7f).contains(&b))
+        {
             return None;
         }
         Some(String::from_utf8_lossy(s).into_owned())
@@ -152,7 +156,9 @@ impl fmt::Display for Qvm {
 
 /// Decode a little-endian int32 buffer as a list of ints.
 pub fn as_int32(buf: &[u8]) -> Vec<i32> {
-    buf.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    buf.chunks_exact(4)
+        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
 /// Parse a QVM file from raw bytes.
@@ -168,7 +174,9 @@ pub fn parse(bytes: &[u8]) -> Result<Qvm, QvmError> {
         m => return Err(QvmError::BadMagic(m)),
     };
 
-    let rd32 = |off: usize| i32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+    let rd32 = |off: usize| {
+        i32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    };
 
     let mut q = Qvm {
         path: String::new(),
@@ -198,28 +206,42 @@ pub fn parse(bytes: &[u8]) -> Result<Qvm, QvmError> {
 
     // code segment
     let (co, cl) = (q.code_offset as usize, q.code_length as usize);
-    let end = co.checked_add(cl).ok_or_else(|| QvmError::OutOfBounds("code overflow".into()))?;
+    let end = co
+        .checked_add(cl)
+        .ok_or_else(|| QvmError::OutOfBounds("code overflow".into()))?;
     if end > bytes.len() {
-        return Err(QvmError::OutOfBounds("code segment out of file bounds".into()));
+        return Err(QvmError::OutOfBounds(
+            "code segment out of file bounds".into(),
+        ));
     }
     q.code = bytes[co..end].to_vec();
 
     // data + lit + (VER2) jtrg
     let (doff, dl) = (q.data_offset as usize, q.data_length as usize);
     let lit = q.lit_length as usize;
-    let d_end = doff.checked_add(dl).ok_or_else(|| QvmError::OutOfBounds("data overflow".into()))?;
-    let l_end = d_end.checked_add(lit).ok_or_else(|| QvmError::OutOfBounds("lit overflow".into()))?;
+    let d_end = doff
+        .checked_add(dl)
+        .ok_or_else(|| QvmError::OutOfBounds("data overflow".into()))?;
+    let l_end = d_end
+        .checked_add(lit)
+        .ok_or_else(|| QvmError::OutOfBounds("lit overflow".into()))?;
     if l_end > bytes.len() {
-        return Err(QvmError::OutOfBounds("data segment out of file bounds".into()));
+        return Err(QvmError::OutOfBounds(
+            "data segment out of file bounds".into(),
+        ));
     }
     q.data = bytes[doff..d_end].to_vec();
     q.lit = bytes[d_end..l_end].to_vec();
 
     if nints == V2_HEADER_INTS {
         let jtrg = q.jtrg_length as usize;
-        let j_end = l_end.checked_add(jtrg).ok_or_else(|| QvmError::OutOfBounds("jtrg overflow".into()))?;
+        let j_end = l_end
+            .checked_add(jtrg)
+            .ok_or_else(|| QvmError::OutOfBounds("jtrg overflow".into()))?;
         if j_end > bytes.len() {
-            return Err(QvmError::OutOfBounds("jump table out of file bounds".into()));
+            return Err(QvmError::OutOfBounds(
+                "jump table out of file bounds".into(),
+            ));
         }
         q.jump_table_targets = bytes[l_end..j_end].to_vec();
     }
@@ -245,8 +267,16 @@ mod tests {
 
     fn v1_header(instr: i32, code_len: i32, data_len: i32, lit_len: i32, bss_len: i32) -> Vec<u8> {
         let mut h = Vec::new();
-        for v in [0x12721444u32, instr as u32, 32u32, code_len as u32, 32 + code_len as u32,
-                  data_len as u32, lit_len as u32, bss_len as u32] {
+        for v in [
+            0x12721444u32,
+            instr as u32,
+            32u32,
+            code_len as u32,
+            32 + code_len as u32,
+            data_len as u32,
+            lit_len as u32,
+            bss_len as u32,
+        ] {
             h.extend_from_slice(&v.to_le_bytes());
         }
         h
@@ -258,7 +288,13 @@ mod tests {
         let data = vec![0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]; // little-endian 1,2
         let lit = b"hello\0".to_vec();
         let mut f = Vec::new();
-        f.extend_from_slice(&v1_header(1, code.len() as i32, data.len() as i32, lit.len() as i32, 8));
+        f.extend_from_slice(&v1_header(
+            1,
+            code.len() as i32,
+            data.len() as i32,
+            lit.len() as i32,
+            8,
+        ));
         f.extend_from_slice(&code);
         f.extend_from_slice(&data);
         f.extend_from_slice(&lit);
@@ -284,8 +320,17 @@ mod tests {
 
         let mut h = Vec::new();
         let hdr = 36u32;
-        for v in [0x12721445u32, 1u32, hdr, code.len() as u32, hdr + code.len() as u32,
-                  data.len() as u32, lit.len() as u32, 8u32, jtrg.len() as u32] {
+        for v in [
+            0x12721445u32,
+            1u32,
+            hdr,
+            code.len() as u32,
+            hdr + code.len() as u32,
+            data.len() as u32,
+            lit.len() as u32,
+            8u32,
+            jtrg.len() as u32,
+        ] {
             h.extend_from_slice(&v.to_le_bytes());
         }
         let mut f = h;

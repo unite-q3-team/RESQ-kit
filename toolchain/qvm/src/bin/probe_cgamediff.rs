@@ -15,8 +15,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use qvm::probe_common::{TrapLog, make_handler};
-use qvm::{Emu, build_functions, disassemble, load};
+use qvm::probe_common::{make_handler, TrapLog};
+use qvm::{build_functions, disassemble, load, Emu};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -120,7 +120,7 @@ fn main() {
         );
     }
 
-    for (ci, cmd) in seq.iter().copied().enumerate() {
+    for cmd in seq.iter().copied() {
         if cmd.0 == 0 {
             if let Ok(v) = std::env::var("QVM_WATCH") {
                 let w = i32::from_str_radix(v.trim_start_matches("0x"), 16).unwrap_or(0);
@@ -214,8 +214,12 @@ fn main() {
             let (x, y) = (l1.get(j), l2.get(j));
             if x != y {
                 diffs += 1;
-                let xi = t1.get(j).map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns1, i)));
-                let yi = t2.get(j).map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns2, i)));
+                let xi = t1
+                    .get(j)
+                    .map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns1, i)));
+                let yi = t2
+                    .get(j)
+                    .map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns2, i)));
                 diff_lines.push(format!(
                     "      #{j}: orig {:?} {} vs rebuilt {:?} {}",
                     x.map(|t| (t.name.clone(), t.args.clone())),

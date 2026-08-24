@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use qvm::probe_common::make_handler;
-use qvm::{Emu, build_functions, disassemble, load};
+use qvm::{build_functions, disassemble, load, Emu};
 
 fn main() {
     let path = std::env::args().nth(1).unwrap();
@@ -30,7 +30,11 @@ fn main() {
     println!("BARE call(0,..) result={r0:?} tab={tab:?}");
 
     let ps0 = q.data_mask() as i32 + 1 - (8 + 4 * qvm::emu::MAX_VMMAIN_ARGS as i32);
-    println!("data_mask={:#x} ps0={ps0:#x} ps0+8={:#x}", q.data_mask(), (ps0 + 8));
+    println!(
+        "data_mask={:#x} ps0={ps0:#x} ps0+8={:#x}",
+        q.data_mask(),
+        (ps0 + 8)
+    );
     let mut tab = Vec::new();
     for a in (8..32).step_by(4) {
         tab.push(emu.mem.read_i32_raw(a).unwrap());

@@ -19,8 +19,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use qvm::probe_common::{TrapLog, make_handler_ctrl};
-use qvm::{Emu, build_functions, disassemble, load};
+use qvm::probe_common::{make_handler_ctrl, TrapLog};
+use qvm::{build_functions, disassemble, load, Emu};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -39,17 +39,17 @@ fn main() {
     //   msg 8 -> G_RunFrame(p1=levelTime)
     //   msg 1 -> G_ShutdownGame(p1=restart)
     let seq: &[(i32, i32, i32, i32)] = &[
-        (0, 100, 123, 0),   // GAME_INIT
-        (2, 0, 1, 0),       // GAME_CLIENT_CONNECT (client 0, first time, not a bot)
-        (3, 0, 0, 0),       // GAME_CLIENT_BEGIN
-        (4, 0, 0, 0),       // GAME_CLIENT_USERINFO_CHANGED
-        (7, 0, 0, 0),       // GAME_CLIENT_THINK (pmove; attack button fires EV_FIRE_WEAPON)
-        (7, 0, 0, 0),       // GAME_CLIENT_THINK (ClientEvents -> FireWeapon, projectile spawn)
-        (7, 0, 0, 0),       // GAME_CLIENT_THINK
-        (8, 1000, 0, 0),    // GAME_RUN_FRAME
-        (8, 1100, 0, 0),    // GAME_RUN_FRAME
-        (5, 0, 0, 0),       // GAME_CLIENT_DISCONNECT
-        (1, 0, 0, 0),       // GAME_SHUTDOWN
+        (0, 100, 123, 0), // GAME_INIT
+        (2, 0, 1, 0),     // GAME_CLIENT_CONNECT (client 0, first time, not a bot)
+        (3, 0, 0, 0),     // GAME_CLIENT_BEGIN
+        (4, 0, 0, 0),     // GAME_CLIENT_USERINFO_CHANGED
+        (7, 0, 0, 0),     // GAME_CLIENT_THINK (pmove; attack button fires EV_FIRE_WEAPON)
+        (7, 0, 0, 0),     // GAME_CLIENT_THINK (ClientEvents -> FireWeapon, projectile spawn)
+        (7, 0, 0, 0),     // GAME_CLIENT_THINK
+        (8, 1000, 0, 0),  // GAME_RUN_FRAME
+        (8, 1100, 0, 0),  // GAME_RUN_FRAME
+        (5, 0, 0, 0),     // GAME_CLIENT_DISCONNECT
+        (1, 0, 0, 0),     // GAME_SHUTDOWN
     ];
     let names = [
         "GAME_INIT",
@@ -91,7 +91,9 @@ fn main() {
         let hc = make_handler_ctrl(q.module, 0, logs.clone());
         let tokens = hc.entity_tokens.clone();
         Side {
-            emu: Emu::new(insns, q).with_syscall(hc.syscall).with_watch_label(label),
+            emu: Emu::new(insns, q)
+                .with_syscall(hc.syscall)
+                .with_watch_label(label),
             logs,
             tokens,
             bounds: vec![0],
@@ -116,12 +118,14 @@ fn main() {
         // The syscall target (-107 -> trap 106 = sqrt) is pushed by `CONST -107`
         // right before the `CALL`; the CALL itself has no operand. Fire on the
         // CONST so the frame (program_stack) is still the caller's.
-        let sqrt_pcs1: Vec<usize> = d1.insns
+        let sqrt_pcs1: Vec<usize> = d1
+            .insns
             .iter()
             .filter(|i| matches!(i.op, qvm::Opcode::Const) && i.operand == Some(-107))
             .map(|i| i.idx)
             .collect();
-        let sqrt_pcs2: Vec<usize> = d2.insns
+        let sqrt_pcs2: Vec<usize> = d2
+            .insns
             .iter()
             .filter(|i| matches!(i.op, qvm::Opcode::Const) && i.operand == Some(-107))
             .map(|i| i.idx)
@@ -213,15 +217,29 @@ fn main() {
                 let m0 = f32::from_bits(emu.mem().load4(spt + 488) as u32);
                 let m1 = f32::from_bits(emu.mem().load4(spt + 492) as u32);
                 let m2 = f32::from_bits(emu.mem().load4(spt + 496) as u32);
-                println!("   SPOT origin2? +92..104=({n0}, {n1}, {n2})  +488..500=({m0}, {m1}, {m2})");
+                println!(
+                    "   SPOT origin2? +92..104=({n0}, {n1}, {n2})  +488..500=({m0}, {m1}, {m2})"
+                );
             }
             // Branch A reads the client at *(ent+516) (g_entities[0] -> world).
             for (tag, ce) in [("A", client_a), ("B", client_b)] {
                 if (ce as u32) < mask {
                     let cl = emu.mem().load4(ce + 516);
-                    let o0 = if (cl as u32) < mask { f32::from_bits(emu.mem().load4(cl + 20) as u32) } else { f32::NAN };
-                    let o1 = if (cl as u32) < mask { f32::from_bits(emu.mem().load4(cl + 24) as u32) } else { f32::NAN };
-                    let o2 = if (cl as u32) < mask { f32::from_bits(emu.mem().load4(cl + 28) as u32) } else { f32::NAN };
+                    let o0 = if (cl as u32) < mask {
+                        f32::from_bits(emu.mem().load4(cl + 20) as u32)
+                    } else {
+                        f32::NAN
+                    };
+                    let o1 = if (cl as u32) < mask {
+                        f32::from_bits(emu.mem().load4(cl + 24) as u32)
+                    } else {
+                        f32::NAN
+                    };
+                    let o2 = if (cl as u32) < mask {
+                        f32::from_bits(emu.mem().load4(cl + 28) as u32)
+                    } else {
+                        f32::NAN
+                    };
                     let d0 = f32::from_bits(emu.mem().load4(20) as u32);
                     let d1 = f32::from_bits(emu.mem().load4(24) as u32);
                     let d2 = f32::from_bits(emu.mem().load4(28) as u32);
@@ -382,10 +400,13 @@ fn main() {
                 }
             }
         }
-        println!("      INITIAL: {count} differing words (masks {:#x}/{:#x})", s1.emu.mem.data_mask, s2.emu.mem.data_mask);
+        println!(
+            "      INITIAL: {count} differing words (masks {:#x}/{:#x})",
+            s1.emu.mem.data_mask, s2.emu.mem.data_mask
+        );
     }
 
-    for (ci, cmd) in seq.iter().copied().enumerate() {
+    for cmd in seq.iter().copied() {
         if cmd.0 == 0 {
             // GAME_INIT = level load: the engine re-points sv.entityParsePoint
             // at SV_SpawnServer; mirror that so a restart re-parses entities.
@@ -459,7 +480,11 @@ fn main() {
                 }
             }
             match first {
-                Some(off) => println!("      first memory divergence at 0x{off:x} ({} words differ, {} shown)", n / 4, shown),
+                Some(off) => println!(
+                    "      first memory divergence at 0x{off:x} ({} words differ, {} shown)",
+                    n / 4,
+                    shown
+                ),
                 None => println!("      memory identical ({} bytes)", n),
             }
         }
@@ -500,8 +525,12 @@ fn main() {
             let (x, y) = (l1.get(j), l2.get(j));
             if x != y {
                 diffs += 1;
-                let xi = t1.get(j).map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns1, i)));
-                let yi = t2.get(j).map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns2, i)));
+                let xi = t1
+                    .get(j)
+                    .map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns1, i)));
+                let yi = t2
+                    .get(j)
+                    .map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns2, i)));
                 diff_lines.push(format!(
                     "      #{j}: orig {:?} {} vs rebuilt {:?} {}\n          raw orig {:?}\n          raw rebld {:?}",
                     x.map(|t| (t.name.clone(), t.args.clone())),
@@ -535,11 +564,17 @@ fn main() {
         }
         if diffs != 0 && std::env::var("QVM_SEQ_VERBOSE").is_ok() {
             for (j, t) in l1.iter().enumerate() {
-                let ti = t1.get(j).map(|&i| format!(" insn {i}, fn[{}]", fn_of(&fns1, i))).unwrap_or_default();
+                let ti = t1
+                    .get(j)
+                    .map(|&i| format!(" insn {i}, fn[{}]", fn_of(&fns1, i)))
+                    .unwrap_or_default();
                 println!("      orig #{j}: {}({:?}){ti}", t.name, t.args);
             }
             for (j, t) in l2.iter().enumerate() {
-                let ti = t2.get(j).map(|&i| format!(" insn {i}, fn[{}]", fn_of(&fns2, i))).unwrap_or_default();
+                let ti = t2
+                    .get(j)
+                    .map(|&i| format!(" insn {i}, fn[{}]", fn_of(&fns2, i)))
+                    .unwrap_or_default();
                 println!("      rebld #{j}: {}({:?}){ti}", t.name, t.args);
             }
         }

@@ -11,7 +11,10 @@ fn main() {
         std::process::exit(2);
     }
     let path = args.first().cloned().unwrap();
-    let out_path = args.get(1).cloned().unwrap_or_else(|| "out_all.c".to_string());
+    let out_path = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "out_all.c".to_string());
     let names_path = args.get(2).cloned();
     let handle = std::thread::Builder::new()
         .stack_size(512 * 1024 * 1024)
@@ -101,6 +104,10 @@ fn run(path: &str, out_path: &str, names_path: Option<&str>, raw: bool) {
         }
         out.push('\n');
     }
-    std::fs::write(&out_path, &out).expect("write");
-    println!("wrote {out_path} ({} bytes, {} functions)", out.len(), cfgs.len());
+    std::fs::write(out_path, &out).expect("write");
+    println!(
+        "wrote {out_path} ({} bytes, {} functions)",
+        out.len(),
+        cfgs.len()
+    );
 }

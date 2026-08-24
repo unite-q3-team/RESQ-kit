@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use qvm::{Opcode, build_functions, disassemble, load, load_map};
+use qvm::{build_functions, disassemble, load, load_map};
 
 fn fingerprint(d: &qvm::Disassembly, start: usize, end: usize) -> Vec<(u8, i64)> {
     d.insns[start..end]
@@ -86,7 +86,9 @@ fn main() {
                 continue;
             }
             let mut it = line.split_whitespace();
-            let (Some(idx), Some(name)) = (it.next(), it.next()) else { continue };
+            let (Some(idx), Some(name)) = (it.next(), it.next()) else {
+                continue;
+            };
             let idx = idx.trim_start_matches("fn[").trim_end_matches(']');
             if let Ok(fi) = idx.parse::<usize>() {
                 ovr.insert(fi, name.to_string());
@@ -104,18 +106,27 @@ fn main() {
     let tq = load(target_qvm).expect("load target");
     let td = disassemble(&tq).expect("disasm target");
     let tr = build_functions(&td);
-    println!("known {} ({} fn)  target {} ({} fn)", known_qvm, kr.len(), target_qvm, tr.len());
+    println!(
+        "known {} ({} fn)  target {} ({} fn)",
+        known_qvm,
+        kr.len(),
+        target_qvm,
+        tr.len()
+    );
 
     let mut exact: HashMap<Vec<(u8, i64)>, (&str, usize)> = HashMap::new();
     for &(start, end) in kr.iter() {
         if let Some(name) = idx.get(&start) {
-            exact.entry(fingerprint(&kd, start, end)).or_insert((name, start));
+            exact
+                .entry(fingerprint(&kd, start, end))
+                .or_insert((name, start));
         }
     }
     let mut ops: HashMap<Vec<u8>, (&str, usize)> = HashMap::new();
     for &(start, end) in kr.iter() {
         if let Some(name) = idx.get(&start) {
-            ops.entry(opcode_only(&kd, start, end)).or_insert((name, start));
+            ops.entry(opcode_only(&kd, start, end))
+                .or_insert((name, start));
         }
     }
     let mut sigs: HashMap<String, (&str, usize)> = HashMap::new();
@@ -217,7 +228,13 @@ fn main() {
         100.0 * total_named as f64 / total as f64
     );
 
-    let out = format!("{}.names", std::path::Path::new(target_qvm).file_stem().unwrap().to_string_lossy());
+    let out = format!(
+        "{}.names",
+        std::path::Path::new(target_qvm)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+    );
     let mut w = String::new();
     for (fi, _start, _len, name) in &rows {
         if !name.is_empty() {

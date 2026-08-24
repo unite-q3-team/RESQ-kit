@@ -2,7 +2,10 @@ use qvm::{build_functions, disassemble, load};
 
 fn main() {
     let path = std::env::args().nth(1).expect("path");
-    let around: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(28752);
+    let around: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(28752);
     let q = load(&path).expect("load");
     let d = disassemble(&q).expect("disasm");
     let ranges = build_functions(&d);

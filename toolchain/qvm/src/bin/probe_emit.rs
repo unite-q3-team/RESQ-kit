@@ -24,8 +24,8 @@
 use qvm::decompile::float_or;
 use qvm::decompile::LoadSize;
 use qvm::{
-    Expr, Function, Opcode, Stmt, Terminator, build_cfg, build_functions, decompile_function,
-    disassemble, load, reachable_blocks, trap_name,
+    build_cfg, build_functions, decompile_function, disassemble, load, reachable_blocks, trap_name,
+    Expr, Function, Opcode, Stmt, Terminator,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -62,7 +62,9 @@ fn indir_table_len(
 ) -> usize {
     let mut n = 0usize;
     while n < MAX_TABLE_ENTRIES {
-        let Some(w) = blob_word(blob, base + n * stride) else { break };
+        let Some(w) = blob_word(blob, base + n * stride) else {
+            break;
+        };
         if w == 0 {
             n += 1;
             continue;
@@ -118,7 +120,13 @@ struct Emitter {
 fn sanitize(name: &str) -> String {
     let mut s: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if s.is_empty() || s.as_bytes()[0].is_ascii_digit() {
         s = format!("fn_{s}");
@@ -133,7 +141,8 @@ fn parse_names(path: &str) -> HashMap<usize, String> {
             let mut it = line.split_whitespace();
             if let (Some(f), Some(n)) = (it.next(), it.next()) {
                 if let Some(rest) = f.strip_prefix("fn[") {
-                    if let Some(idx) = rest.strip_suffix(']').and_then(|x| x.parse::<usize>().ok()) {
+                    if let Some(idx) = rest.strip_suffix(']').and_then(|x| x.parse::<usize>().ok())
+                    {
                         out.insert(idx, n.to_string());
                     }
                 }
@@ -153,8 +162,12 @@ fn parse_sigs(path: &str) -> HashMap<usize, Sig> {
             }
             let mut it = line.split_whitespace();
             let head = it.next().unwrap_or("");
-            let Some(idx) = head.strip_prefix("fn[").and_then(|r| r.strip_suffix(']').and_then(|x| x.parse::<usize>().ok()))
-            else { continue };
+            let Some(idx) = head
+                .strip_prefix("fn[")
+                .and_then(|r| r.strip_suffix(']').and_then(|x| x.parse::<usize>().ok()))
+            else {
+                continue;
+            };
             let mut frame = 0;
             let mut args = 0usize;
             let mut ret = "int".to_string();
@@ -176,7 +189,7 @@ fn parse_sigs(path: &str) -> HashMap<usize, Sig> {
 /// `(off - frame - 8) / 4` if `off` is an argument slot.
 fn arg_index(frame: i32, off: usize) -> Option<usize> {
     let f = frame as usize;
-    if off >= f + 8 && (off - f - 8) % 4 == 0 {
+    if off >= f + 8 && (off - f - 8).is_multiple_of(4) {
         Some((off - f - 8) / 4)
     } else {
         None
@@ -277,7 +290,7 @@ fn collect_non_i4_locals(f: &Function, frame: i32) -> HashSet<usize> {
             bad.insert(off);
         }
     };
-    let mut walk = |e: &Expr, bad: &mut HashSet<usize>| {
+    let walk = |e: &Expr, bad: &mut HashSet<usize>| {
         let mut st: Vec<&Expr> = vec![e];
         while let Some(x) = st.pop() {
             match x {
@@ -493,17 +506,16 @@ impl Emitter {
         if c == 0 {
             return "0".into();
         }
-            if self.typed && self.overlay == qvm::types::OverlayMod::Game && self.intused.contains(&c)
-            {
-                use qvm::types::{GCLIENTS_BASE, GENTITIES_BASE};
-                if c == GENTITIES_BASE as i32 {
-                    return "GENTITIES_BASE".into();
-                }
-                if c == GCLIENTS_BASE as i32 {
-                    return "GCLIENTS_BASE".into();
-                }
+        if self.typed && self.overlay == qvm::types::OverlayMod::Game && self.intused.contains(&c) {
+            use qvm::types::{GCLIENTS_BASE, GENTITIES_BASE};
+            if c == GENTITIES_BASE as i32 {
+                return "GENTITIES_BASE".into();
             }
-            if c >= 0 {
+            if c == GCLIENTS_BASE as i32 {
+                return "GCLIENTS_BASE".into();
+            }
+        }
+        if c >= 0 {
             // A function entry proven used as a function pointer (stored,
             // passed as an arg, or compared) always renders as the C name so
             // every use of the pointer agrees in the rebuilt module, where
@@ -574,7 +586,8 @@ impl Emitter {
     /// syscall must receive the original image offset, never the rebuilt C
     /// function address.
     fn fmt_trap_const(&self, c: i32) -> String {
-        if c >= 0 && !self.intused.contains(&c)
+        if c >= 0
+            && !self.intused.contains(&c)
             && (self.q.string_at(c).is_some() || self.data_addrs.contains(&c))
         {
             return if c >= 4 {
@@ -612,7 +625,7 @@ impl Emitter {
     }
 
     /// True if `e` renders as a C pointer expression.
-    fn pval(&self, body: &Body, e: &Expr) -> bool {
+    fn pval(&self, _body: &Body, e: &Expr) -> bool {
         match e {
             Expr::AddrLocal(_) => true,
             Expr::Const(c) => self.q.string_at(*c).is_some(),
@@ -656,7 +669,10 @@ impl Emitter {
                 }
             }
         }
-        let params = (0..nargs).map(|_| "int".to_string()).collect::<Vec<_>>().join(",");
+        let params = (0..nargs)
+            .map(|_| "int".to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         format!("((int (*)({params}))({}))", self.fmt(body, t, false))
     }
 
@@ -710,11 +726,7 @@ impl Emitter {
                 }
                 if matches!(size, LoadSize::I4) {
                     if let Some(s) = self.fmt_overlay_field(body, a) {
-                        return if f {
-                            format!("*(float*)&{s}")
-                        } else {
-                            s
-                        };
+                        return if f { format!("*(float*)&{s}") } else { s };
                     }
                 }
                 mem_ref(self.fmt(body, a, false), *size, f)
@@ -746,12 +758,23 @@ impl Emitter {
                     // underlying load as its signed type so lcc emits
                     // LOAD1+SEX8 / LOAD2+SEX16 (INDIRI+CVII4); the unsigned
                     // zero-extension (CVUI4 -> IGNORE) would drop the sign.
-                    let ty = if *op == "(signed char)" { "signed char" } else { "signed short" };
+                    let ty = if *op == "(signed char)" {
+                        "signed char"
+                    } else {
+                        "signed short"
+                    };
                     match a.as_ref() {
-                        Expr::Local { off, size } if matches!(size, LoadSize::I1 | LoadSize::I2) => {
+                        Expr::Local {
+                            off,
+                            size: LoadSize::I1 | LoadSize::I2,
+                        } => {
                             if let Some(k) = arg_index(body.frame, *off) {
                                 body.nparams = body.nparams.max(k + 1);
-                                let mask = if *op == "(signed char)" { format!("(p{k} & 255)") } else { format!("(p{k} & 65535)") };
+                                let mask = if *op == "(signed char)" {
+                                    format!("(p{k} & 255)")
+                                } else {
+                                    format!("(p{k} & 65535)")
+                                };
                                 format!("({ty})({mask})")
                             } else {
                                 body.locals.insert(*off);
@@ -762,12 +785,13 @@ impl Emitter {
                                 }
                             }
                         }
-                        Expr::MemRef(addr, size) if matches!(size, LoadSize::I1 | LoadSize::I2) => {
+                        Expr::MemRef(addr, LoadSize::I1 | LoadSize::I2) => {
                             format!("*({ty}*)({})", self.fmt(body, addr, false))
                         }
-                        Expr::GlobalRef { addr, size } if matches!(size, LoadSize::I1 | LoadSize::I2) => {
-                            self.typed_load(*addr, ty)
-                        }
+                        Expr::GlobalRef {
+                            addr,
+                            size: LoadSize::I1 | LoadSize::I2,
+                        } => self.typed_load(*addr, ty),
                         _ => format!("({ty})({})", self.fmt(body, a, f)),
                     }
                 } else {
@@ -792,7 +816,11 @@ impl Emitter {
                     } else {
                         binop_fmt(op, &self.fmt(body, a, f), &self.fmt(body, b, f))
                     }
-                } else if self.typed && op == "*" && !f && self.overlay == qvm::types::OverlayMod::Game {
+                } else if self.typed
+                    && op == "*"
+                    && !f
+                    && self.overlay == qvm::types::OverlayMod::Game
+                {
                     match (a.as_ref(), b.as_ref()) {
                         (Expr::Const(n), x) | (x, Expr::Const(n)) => {
                             if let Some(m) = qvm::types::stride_macro(*n) {
@@ -832,13 +860,19 @@ impl Emitter {
                 let mut a: Vec<String> = if float_trap(*n) {
                     args.iter().map(|x| self.fmt_float(body, x)).collect()
                 } else {
-                    args.iter().map(|x| match x {
-                        Expr::Const(c) => self.fmt_trap_const(*c),
-                        _ => self.fmt_int(body, x),
-                    }).collect()
+                    args.iter()
+                        .map(|x| match x {
+                            Expr::Const(c) => self.fmt_trap_const(*c),
+                            _ => self.fmt_int(body, x),
+                        })
+                        .collect()
                 };
                 while a.len() < arity {
-                    a.push(if float_trap(*n) { "0.0f".into() } else { "0".into() });
+                    a.push(if float_trap(*n) {
+                        "0.0f".into()
+                    } else {
+                        "0".into()
+                    });
                 }
                 format!("{name}({})", a.join(", "))
             }
@@ -947,11 +981,7 @@ impl Emitter {
             a => {
                 if matches!(size, LoadSize::I4) {
                     if let Some(s) = self.fmt_overlay_field(body, a) {
-                        return if f {
-                            format!("*(float*)&{s}")
-                        } else {
-                            s
-                        };
+                        return if f { format!("*(float*)&{s}") } else { s };
                     }
                 }
                 let base = self.fmt(body, a, false);
@@ -1000,11 +1030,17 @@ impl Emitter {
                 return Some(format!("((int)&{view}->{field})"));
             }
             let base_s = self.fmt(body, base, false);
-            return Some(format!("((int)&(({ty}*){})->{field})", wrap_cast_operand(&base_s)));
+            return Some(format!(
+                "((int)&(({ty}*){})->{field})",
+                wrap_cast_operand(&base_s)
+            ));
         }
         if self.overlay == qvm::types::OverlayMod::Game {
             if let Some(note) = qvm::types::field_addend_for(kind, n) {
-                return Some(format!("({}) + ({n} /* {note} */)", self.fmt(body, base, false)));
+                return Some(format!(
+                    "({}) + ({n} /* {note} */)",
+                    self.fmt(body, base, false)
+                ));
             }
         }
         None
@@ -1107,8 +1143,11 @@ impl Emitter {
     }
 }
 
+#[allow(clippy::absurd_extreme_comparisons, clippy::impossible_comparisons)] // template constants start at 0
 fn pointer_kind(e: &Expr, body: &Body) -> Option<qvm::types::PtrKind> {
-    use qvm::types::{PtrKind, OverlayMod, GCLIENTS_BASE, GCLIENTS_END, GENTITIES_BASE, GENTITIES_END, LEVEL_BASE};
+    use qvm::types::{
+        OverlayMod, PtrKind, GCLIENTS_BASE, GCLIENTS_END, GENTITIES_BASE, GENTITIES_END, LEVEL_BASE,
+    };
     let game = body.overlay == OverlayMod::Game;
     match e {
         Expr::Local { off, .. } => body.ptr_kind.get(off).copied(),
@@ -1179,13 +1218,11 @@ fn mem_ref(addr: String, size: LoadSize, f: bool) -> String {
 /// Per-function emission context.
 struct Body {
     frame: i32,
-    ret: String,
     slot_float: HashSet<usize>,
     local_float: HashSet<usize>,
     locals: BTreeSet<usize>,
     slots: BTreeSet<usize>,
     nparams: usize,
-    fn_name: String,
     overlay: qvm::types::OverlayMod,
     local_names: HashMap<usize, String>,
     /// LOCAL offset → gentity* / gclient* when this function uses entity-unique
@@ -1214,11 +1251,13 @@ fn infer_floats(f: &Function, reach: &[bool]) -> (HashSet<usize>, HashSet<usize>
                             slot_float.insert(*slot);
                         }
                     }
-                    Stmt::Store { addr, value, .. } => {
-                        if let Expr::AddrLocal(off) = addr {
-                            if float_or_pe(slot_float.contains(off), &local_float, value) {
-                                local_float.insert(*off);
-                            }
+                    Stmt::Store {
+                        addr: Expr::AddrLocal(off),
+                        value,
+                        ..
+                    } => {
+                        if float_or_pe(slot_float.contains(off), &local_float, value) {
+                            local_float.insert(*off);
                         }
                     }
                     _ => {}
@@ -1230,7 +1269,8 @@ fn infer_floats(f: &Function, reach: &[bool]) -> (HashSet<usize>, HashSet<usize>
 }
 
 /// Find the highest argument index referenced anywhere in a function body.
-fn body_max_arg(f: &Function, frame: i32) -> Option<usize> {    let mut maxk: Option<usize> = None;
+fn body_max_arg(f: &Function, frame: i32) -> Option<usize> {
+    let mut maxk: Option<usize> = None;
     let mut walk = |e: &Expr| {
         let mut st: Vec<&Expr> = vec![e];
         while let Some(x) = st.pop() {
@@ -1288,16 +1328,19 @@ fn infer_ptr_kinds(
     f: &Function,
     overlay: qvm::types::OverlayMod,
 ) -> HashMap<usize, qvm::types::PtrKind> {
-    use qvm::types::{PtrKind, OverlayMod, GCLIENTS_BASE, GCLIENT_SIZE, GENTITIES_BASE, GENTITY_SIZE, LEVEL_BASE};
+    use qvm::types::{
+        OverlayMod, PtrKind, GCLIENTS_BASE, GCLIENT_SIZE, GENTITIES_BASE, GENTITY_SIZE, LEVEL_BASE,
+    };
 
     let mut kind: HashMap<usize, PtrKind> = HashMap::new();
-    let mark = |map: &mut HashMap<usize, PtrKind>, off: usize, k: PtrKind| {
-        match (map.get(&off).copied(), k) {
-            (Some(PtrKind::Client), PtrKind::Entity) => {}
-            (Some(PtrKind::Menu), _) => {}
-            _ => {
-                map.insert(off, k);
-            }
+    let mark = |map: &mut HashMap<usize, PtrKind>, off: usize, k: PtrKind| match (
+        map.get(&off).copied(),
+        k,
+    ) {
+        (Some(PtrKind::Client), PtrKind::Entity) => {}
+        (Some(PtrKind::Menu), _) => {}
+        _ => {
+            map.insert(off, k);
         }
     };
     let local_of = |e: &Expr| -> Option<usize> {
@@ -1387,7 +1430,9 @@ fn infer_ptr_kinds(
         }
     };
 
-    let walk_fn = |f: &Function, kind: &mut HashMap<usize, PtrKind>, walk: &mut dyn FnMut(&Expr, &mut HashMap<usize, PtrKind>)| {
+    let walk_fn = |f: &Function,
+                   kind: &mut HashMap<usize, PtrKind>,
+                   walk: &mut dyn FnMut(&Expr, &mut HashMap<usize, PtrKind>)| {
         for b in &f.blocks {
             for s in &b.body {
                 match s {
@@ -1594,9 +1639,7 @@ fn emit_function(em: &mut Emitter, out: &mut String, fi: usize) {
                 }
             }
         }
-        if em.overlay == qvm::types::OverlayMod::Game
-            && !local_names.values().any(|n| n == "gcl")
-        {
+        if em.overlay == qvm::types::OverlayMod::Game && !local_names.values().any(|n| n == "gcl") {
             let mut best: Option<usize> = None;
             for (off, k) in &ptr_kind {
                 if *k == qvm::types::PtrKind::Entity {
@@ -1615,13 +1658,11 @@ fn emit_function(em: &mut Emitter, out: &mut String, fi: usize) {
 
     let mut body = Body {
         frame,
-        ret: ret.clone(),
         slot_float,
         local_float,
         locals: BTreeSet::new(),
         slots: BTreeSet::new(),
         nparams,
-        fn_name: em.name_of(fi).to_string(),
         overlay: em.overlay,
         local_names,
         ptr_kind,
@@ -1643,7 +1684,12 @@ fn emit_function(em: &mut Emitter, out: &mut String, fi: usize) {
     let mut local_bare_stores: Vec<(i32, i32)> = Vec::new();
     for b in &f.blocks {
         for st in &b.body {
-            if let Stmt::Store { addr: Expr::Const(a), value: Expr::Const(v), .. } = st {
+            if let Stmt::Store {
+                addr: Expr::Const(a),
+                value: Expr::Const(v),
+                ..
+            } = st
+            {
                 local_bare_stores.push((*a, *v));
             }
         }
@@ -1709,7 +1755,12 @@ fn emit_function(em: &mut Emitter, out: &mut String, fi: usize) {
     let mut indexed_groups: Vec<(&Expr, Vec<(i32, i32)>)> = Vec::new();
     for b in &f.blocks {
         for st in &b.body {
-            if let Stmt::Store { addr, value: Expr::Const(v), .. } = st {
+            if let Stmt::Store {
+                addr,
+                value: Expr::Const(v),
+                ..
+            } = st
+            {
                 if let Some((k, base)) = split_indexed_addr(addr) {
                     match indexed_groups.iter_mut().find(|(gb, _)| *gb == base) {
                         Some((_, offs)) => offs.push((k, *v)),
@@ -1868,9 +1919,7 @@ fn emit_function(em: &mut Emitter, out: &mut String, fi: usize) {
                             pure_siblings.iter().any(|&d| {
                                 let stride = d.abs();
                                 stride > 0
-                                    && pure_siblings
-                                        .iter()
-                                        .any(|&d2| d2 == 2 * d || d2 == -2 * d)
+                                    && pure_siblings.iter().any(|&d2| d2 == 2 * d || d2 == -2 * d)
                             })
                         }
                         _ => false,
@@ -1973,9 +2022,16 @@ fn emit_function(em: &mut Emitter, out: &mut String, fi: usize) {
                 }
             }
             Terminator::Unresolved(a) => {
-                text.push_str(&format!("  /* UNRESOLVED JUMP: ({}) */\n", em.fmt(&mut body, a, false)));
+                text.push_str(&format!(
+                    "  /* UNRESOLVED JUMP: ({}) */\n",
+                    em.fmt(&mut body, a, false)
+                ));
             }
-            Terminator::Switch { sel, cases, default } => {
+            Terminator::Switch {
+                sel,
+                cases,
+                default,
+            } => {
                 let mut counts: HashMap<usize, usize> = HashMap::new();
                 for (_, t) in cases {
                     *counts.entry(*t).or_insert(0) += 1;
@@ -1991,7 +2047,10 @@ fn emit_function(em: &mut Emitter, out: &mut String, fi: usize) {
                         None
                     }
                 });
-                text.push_str(&format!("  switch ({}) {{\n", em.fmt(&mut body, sel, false)));
+                text.push_str(&format!(
+                    "  switch ({}) {{\n",
+                    em.fmt(&mut body, sel, false)
+                ));
                 for (v, t) in cases {
                     if default_target == Some(*t) {
                         continue;
@@ -2020,7 +2079,11 @@ fn emit_function(em: &mut Emitter, out: &mut String, fi: usize) {
         head.push_str(&format!("{ret} {}(void) {{\n", em.name_of(fi)));
     } else {
         let params: Vec<String> = (0..nparams).map(|k| format!("int p{k}")).collect();
-        head.push_str(&format!("{ret} {}({}) {{\n", em.name_of(fi), params.join(", ")));
+        head.push_str(&format!(
+            "{ret} {}({}) {{\n",
+            em.name_of(fi),
+            params.join(", ")
+        ));
     }
     if body.locals.is_empty() && f.blocks.iter().all(|b| b.body.is_empty()) {
         head.push_str("  /* empty in orig QVM */\n");
@@ -2028,7 +2091,8 @@ fn emit_function(em: &mut Emitter, out: &mut String, fi: usize) {
 
     // variable declarations (C89: must precede all statements)
     if em.typed {
-        let mut arg_names: Vec<(usize, String)> = body.arg_view.iter().map(|(k, n)| (*k, n.clone())).collect();
+        let mut arg_names: Vec<(usize, String)> =
+            body.arg_view.iter().map(|(k, n)| (*k, n.clone())).collect();
         arg_names.sort_by_key(|(k, _)| *k);
         for (k, name) in &arg_names {
             let off = body.frame as usize + 8 + 4 * k;
@@ -2048,7 +2112,11 @@ fn emit_function(em: &mut Emitter, out: &mut String, fi: usize) {
         let sz = body.frame.max(1) as usize;
         head.push_str(&format!("  unsigned char loc_0[{sz}];\n"));
         if em.typed {
-            let mut names: Vec<(usize, String)> = body.local_names.iter().map(|(o, n)| (*o, n.clone())).collect();
+            let mut names: Vec<(usize, String)> = body
+                .local_names
+                .iter()
+                .map(|(o, n)| (*o, n.clone()))
+                .collect();
             names.sort_by_key(|(o, _)| *o);
             for (off, name) in names {
                 if !body.locals.contains(&off) {
@@ -2241,11 +2309,21 @@ fn is_string_at(q: &qvm::Qvm, c: i32) -> bool {
             let s = &rest[..end];
             return !s.is_empty()
                 && s.iter()
-                    .all(|&b| b == b'\n' || b == b'\r' || b == b'\t' || (b >= 0x20 && b < 0x7f));
+                    .all(|&b| b == b'\n' || b == b'\r' || b == b'\t' || (0x20..0x7f).contains(&b));
         }
     }
     false
 }
+
+/// BSS/data sets collected by a scan: addrtaken slots, string cells, float
+/// cells, pointer-table candidates and read-only data addresses.
+type AddrTaken = (
+    HashSet<usize>,
+    HashSet<i32>,
+    HashSet<i32>,
+    HashSet<i32>,
+    HashSet<i32>,
+);
 
 fn scan_addrtaken(
     d: &qvm::disasm::Disassembly,
@@ -2253,7 +2331,7 @@ fn scan_addrtaken(
     blob_len: usize,
     strings: &HashSet<i32>,
     module: qvm::traps::Module,
-) -> (HashSet<usize>, HashSet<i32>, HashSet<i32>, HashSet<i32>, HashSet<i32>) {
+) -> AddrTaken {
     use qvm::Opcode::*;
     // Stack value: a known constant, a LOCAL slot address, a value loaded from
     // a bare global cell (CellLoad), a value loaded from a LOCAL slot i.e. a
@@ -2361,17 +2439,15 @@ fn scan_addrtaken(
             }
             Local => st.push(Se::L(ins.operand.unwrap_or(0))),
             Push => st.push(Se::O),
-            Load1 | Load2 | Load4 => {
-                match st.pop() {
-                    Some(Se::C(c)) => {
-                        argstore.insert(c);
-                        st.push(Se::CellLoad(c));
-                    }
-                    Some(Se::L(off)) => st.push(Se::Param(off)),
-                    Some(Se::Field(off)) => st.push(Se::FieldLoad(off)),
-                    _ => st.push(Se::O),
+            Load1 | Load2 | Load4 => match st.pop() {
+                Some(Se::C(c)) => {
+                    argstore.insert(c);
+                    st.push(Se::CellLoad(c));
                 }
-            }
+                Some(Se::L(off)) => st.push(Se::Param(off)),
+                Some(Se::Field(off)) => st.push(Se::FieldLoad(off)),
+                _ => st.push(Se::O),
+            },
             Store1 | Store2 | Store4 => {
                 // STORE4 pops (address, value) with value on top. A stored
                 // constant is a genuine function pointer (ent->think = fn)
@@ -2410,10 +2486,14 @@ fn scan_addrtaken(
                         Some(Se::L(_)) => {} // local-slot config literal
                         Some(Se::C(_)) => {
                             if by_entry.contains_key(&(c as usize)) {
-                                storevals.insert((c, addr.and_then(|a| match a {
-                                    Se::C(cell) => Some(cell),
-                                    _ => None,
-                                }), true));
+                                storevals.insert((
+                                    c,
+                                    addr.and_then(|a| match a {
+                                        Se::C(cell) => Some(cell),
+                                        _ => None,
+                                    }),
+                                    true,
+                                ));
                             }
                         } // bare-const cell init
                         Some(Se::Field(off)) => {
@@ -2501,14 +2581,14 @@ fn scan_addrtaken(
                 } else {
                     // Normal call (or branch jump): ARG'd constants may be
                     // function pointers (e.g. qsort cmp) and stay candidates.
-                    let args: Vec<i32> = pending.drain(..).collect();
+                    let args: Vec<i32> = std::mem::take(&mut pending);
                     argstore.extend(args.iter().copied());
                     arg_call.extend(args);
                 }
             }
-            Add | Sub | Divi | Divu | Modi | Modu | Muli | Mulu | Band | Bor | Bxor | Lsh | Rshi
-            | Rshu | AddF | SubF | DivF | MulF | Eq | Ne | Lti | Lei | Gti | Gei | Ltu | Leu
-            | Gtu | Geu | Eqf | Nef | Ltf | Lef | Gtf | Gef => {
+            Add | Sub | Divi | Divu | Modi | Modu | Muli | Mulu | Band | Bor | Bxor | Lsh
+            | Rshi | Rshu | AddF | SubF | DivF | MulF | Eq | Ne | Lti | Lei | Gti | Gei | Ltu
+            | Leu | Gtu | Geu | Eqf | Nef | Ltf | Lef | Gtf | Gef => {
                 let b = st.pop();
                 let a = st.pop();
                 let eq = matches!(ins.op, Eq | Ne);
@@ -2589,10 +2669,7 @@ fn scan_addrtaken(
         // constant that resolves to a printable string (a string literal whose
         // data address numerically equals a function entry index): a genuine
         // function pointer never points into a printable string region.
-        if !traparg.contains(&c)
-            && !strings.contains(&c)
-            && by_entry.contains_key(&(c as usize))
-        {
+        if !traparg.contains(&c) && !strings.contains(&c) && by_entry.contains_key(&(c as usize)) {
             fns.insert(c as usize);
         } else if c >= 0x100 && c % 4 == 0 && (c as usize) < blob_len {
             data.insert(c);
@@ -2734,12 +2811,25 @@ fn main() {
     let path = &args[0];
     let out_c = &args[1];
     let out_asm = &args[2];
-    let names_path = args.iter().find(|a| a.ends_with(".names")).map(|s| s.to_string());
-    let sigs_path = args.iter().find(|a| a.ends_with(".sigs")).map(|s| s.to_string());
+    let names_path = args
+        .iter()
+        .find(|a| a.ends_with(".names"))
+        .map(|s| s.to_string());
+    let sigs_path = args
+        .iter()
+        .find(|a| a.ends_with(".sigs"))
+        .map(|s| s.to_string());
     let only: Option<HashSet<usize>> = args.iter().position(|a| a == "--only").and_then(|i| {
-        args.get(i + 1).map(|s| s.split(',').filter_map(|t| t.trim().parse::<usize>().ok()).collect())
+        args.get(i + 1).map(|s| {
+            s.split(',')
+                .filter_map(|t| t.trim().parse::<usize>().ok())
+                .collect()
+        })
     });
-    let lst_stem = args.iter().position(|a| a == "--lst").and_then(|i| args.get(i + 1).map(|s| s.to_string()));
+    let lst_stem = args
+        .iter()
+        .position(|a| a == "--lst")
+        .and_then(|i| args.get(i + 1).map(|s| s.to_string()));
     let wrapper = args.iter().any(|a| a == "--wrapper");
     let no_typed = args.iter().any(|a| a == "--no-typed");
     let want_typed = args.iter().any(|a| a == "--typed");
@@ -2816,8 +2906,13 @@ fn main() {
             }
         }
     }
-    let (fns, data, intused, arithused, traparg) =
-        scan_addrtaken(&em.d, &em.by_entry, em.blob.len(), &string_addrs, em.q.module);
+    let (fns, data, intused, arithused, traparg) = scan_addrtaken(
+        &em.d,
+        &em.by_entry,
+        em.blob.len(),
+        &string_addrs,
+        em.q.module,
+    );
     em.addrtaken = fns;
     em.data_addrs = data;
     em.intused = intused;
@@ -2840,7 +2935,7 @@ fn main() {
             let frame = em.frame_of(fi);
             if let Some(cfg) = build_cfg(&em.d, (start, end), &em.data) {
                 let f = decompile_function(&em.d, &cfg, frame, &em.data);
-                let mut walk = |e: &Expr, stack: &mut Vec<usize>, by_entry: &HashMap<usize, usize>| {
+                let walk = |e: &Expr, stack: &mut Vec<usize>, by_entry: &HashMap<usize, usize>| {
                     let mut st: Vec<&Expr> = vec![e];
                     while let Some(x) = st.pop() {
                         if let Expr::Call(t, args) = x {
@@ -3113,7 +3208,11 @@ fn main() {
             c.push_str(&format!("{ret} {}(void);\n", em.name_of(fi)));
         } else {
             let params: Vec<String> = (0..nparams).map(|k| format!("int p{k}")).collect();
-            c.push_str(&format!("{ret} {}({});\n", em.name_of(fi), params.join(", ")));
+            c.push_str(&format!(
+                "{ret} {}({});\n",
+                em.name_of(fi),
+                params.join(", ")
+            ));
         }
     }
     c.push('\n');
@@ -3122,11 +3221,9 @@ fn main() {
     // address 0), NOT the pow2 dataMask: the mask can double the array
     // (qagame 4.4 MB -> 8 MB image) and overflow q3asm's MAX_IMAGE. Memory
     // past the array is engine-zeroed BSS anyway, so semantics are unchanged.
-    let span_bytes: usize = 4
-        + em.q.data_length as usize
-        + em.q.lit_length as usize
-        + em.q.bss_length as usize;
-    let blob_words_n = (span_bytes + 3) / 4;
+    let span_bytes: usize =
+        4 + em.q.data_length as usize + em.q.lit_length as usize + em.q.bss_length as usize;
+    let blob_words_n = span_bytes.div_ceil(4);
     c.push_str("/* qvm_mem_words = original data+lit+bss, identity-mapped. Cannot become\n");
     c.push_str("   real C globals (BSS would shift and traps break). */\n");
     c.push_str(&format!("void *qvm_mem_words[{blob_words_n}] = {{\n"));
@@ -3172,7 +3269,9 @@ fn main() {
         // bypassed ONLY for this proven case; plain below-blob data that
         // merely collides with an entry stays untouched.
         let proven_fptr = fptr_stored.contains(&val)
-            || bc_ranges.iter().any(|(a, b)| off >= *a as usize && off < *b as usize);
+            || bc_ranges
+                .iter()
+                .any(|(a, b)| off >= *a as usize && off < *b as usize);
         let mut skip = "";
         if proven_fptr {
             // proven by a store site; skip all further exclusions
@@ -3240,7 +3339,7 @@ fn main() {
             c.push('\n');
         }
     }
-    if blob_words.len() % 8 != 0 {
+    if !blob_words.len().is_multiple_of(8) {
         c.push('\n');
     }
     c.push_str("};\n");
@@ -3302,7 +3401,9 @@ fn main() {
         em.trap_cname.insert(n, cand);
     }
     for &n in &em.block_sizes {
-        c.push_str(&format!("typedef struct {{ unsigned char b[{n}]; }} blob_{n};\n"));
+        c.push_str(&format!(
+            "typedef struct {{ unsigned char b[{n}]; }} blob_{n};\n"
+        ));
     }
     if !em.block_sizes.is_empty() {
         c.push('\n');
@@ -3314,14 +3415,20 @@ fn main() {
             let params = if arity == 0 {
                 String::from("void")
             } else {
-                (0..arity).map(|_| String::from("float")).collect::<Vec<_>>().join(", ")
+                (0..arity)
+                    .map(|_| String::from("float"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             };
             c.push_str(&format!("float {name}({params});\n"));
         } else {
             let params = if arity == 0 {
                 String::from("void")
             } else {
-                (0..arity).map(|k| format!("int a{k}")).collect::<Vec<_>>().join(", ")
+                (0..arity)
+                    .map(|k| format!("int a{k}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             };
             c.push_str(&format!("int {name}({params});\n"));
         }
@@ -3356,7 +3463,11 @@ fn main() {
                 let f = decompile_function(&em.d, &cfg, frame, &em.data);
                 for b in &f.blocks {
                     for st in &b.body {
-                        if let Stmt::Store { value: Expr::Const(cv), .. } = st {
+                        if let Stmt::Store {
+                            value: Expr::Const(cv),
+                            ..
+                        } = st
+                        {
                             if *cv >= 0
                                 && em.by_entry.contains_key(&(*cv as usize))
                                 && em.q.string_at(*cv).is_none()
@@ -3374,8 +3485,12 @@ fn main() {
     for &fi in &selected {
         emit_function(&mut em, &mut c, fi);
     }
-    c.push_str("static float qvm_fbits(int x) { union { int i; float f; } u; u.i = x; return u.f; }\n");
-    c.push_str("static int qvm_fbits_i(float f) { union { int i; float f; } u; u.f = f; return u.i; }\n");
+    c.push_str(
+        "static float qvm_fbits(int x) { union { int i; float f; } u; u.i = x; return u.f; }\n",
+    );
+    c.push_str(
+        "static int qvm_fbits_i(float f) { union { int i; float f; } u; u.f = f; return u.i; }\n",
+    );
 
     // Compat (not a decompiler bug): a Driver Info menu Init strcpy's modern
     // GL_EXTENSIONS into a 1024-byte scratch (365972..366996) and overflows into
@@ -3387,9 +3502,7 @@ fn main() {
     let di_n = c.matches(di_from).count();
     if di_n > 0 {
         c = c.replace(di_from, di_to);
-        eprintln!(
-            "compat: DriverInfo strcpy -> Q_strncpyz(…, 1024) ×{di_n}"
-        );
+        eprintln!("compat: DriverInfo strcpy -> Q_strncpyz(…, 1024) ×{di_n}");
     }
 
     // Sample qagame: lcc left the spawn-spot pointer live across the
@@ -3441,8 +3554,16 @@ fn main() {
     if let Some(stem) = lst_stem {
         let stem = Path::new(&stem);
         let stem_name = stem.file_stem().and_then(|s| s.to_str()).unwrap_or("emit");
-        let asm_name = Path::new(out_asm).file_name().and_then(|s| s.to_str()).unwrap_or("syscalls.asm").to_string();
-        let c_name = Path::new(out_c).file_stem().and_then(|s| s.to_str()).unwrap_or("emit").to_string();
+        let asm_name = Path::new(out_asm)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("syscalls.asm")
+            .to_string();
+        let c_name = Path::new(out_c)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("emit")
+            .to_string();
         let lst = format!("{asm_name}\n{c_name}.asm\n");
         let lst_path = stem.with_file_name(format!("{stem_name}.lst"));
         std::fs::write(&lst_path, lst).expect("write lst");

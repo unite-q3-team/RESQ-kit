@@ -19,10 +19,15 @@
 //! absolute addresses are identity-mapped between modules and no arg
 //! normalization is needed (base = 0 for both).
 
-use qvm::probe_common::{TrapLog, run_once};
+use qvm::probe_common::{run_once, TrapLog};
 use qvm::{build_functions, disassemble, load};
 
-fn run(path: &str, fnidx: usize, base: u32, call_args: &[i32]) -> (Vec<TrapLog>, i32, usize, usize, bool) {
+fn run(
+    path: &str,
+    fnidx: usize,
+    base: u32,
+    call_args: &[i32],
+) -> (Vec<TrapLog>, i32, usize, usize, bool) {
     let _ = base;
     let q = load(path).expect("load qvm");
     let d = disassemble(&q).expect("disasm");
@@ -43,7 +48,9 @@ fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     if a.len() < 4 {
         eprintln!("usage: probe_diff <orig.qvm> <orig_fn> <rebuilt.qvm> <rebuilt_fn> [args...]");
-        eprintln!("       rebuilt_fn may be `auto` to locate the matching function by trap sequence");
+        eprintln!(
+            "       rebuilt_fn may be `auto` to locate the matching function by trap sequence"
+        );
         std::process::exit(2);
     }
     let (orig_path, orig_fn) = (&a[0], a[1].parse::<usize>().expect("orig fn"));
@@ -80,7 +87,7 @@ fn main() {
         for k in 0..ranges.len() {
             let (l2, _r2, s2, c2, _v2) = run(reb_path, k, 0, &args2);
             if l2 == l1 {
-                let score = (0) * 4 + (s2 == s1) as usize * 2 + (c2 == c1) as usize;
+                let score = ((s2 == s1) as usize * 2) + (c2 == c1) as usize;
                 cands.push((score, k, s2, c2));
             }
         }
@@ -98,8 +105,14 @@ fn main() {
 
     let (l2, r2, s2, c2, v2) = run(reb_path, reb_fn, 0, &args2);
 
-    println!("orig  fn[{orig_fn}] result={r1} steps={s1} syscalls={c1} traps={}", l1.len());
-    println!("rebld fn[{reb_fn}] result={r2} steps={s2} syscalls={c2} traps={}", l2.len());
+    println!(
+        "orig  fn[{orig_fn}] result={r1} steps={s1} syscalls={c1} traps={}",
+        l1.len()
+    );
+    println!(
+        "rebld fn[{reb_fn}] result={r2} steps={s2} syscalls={c2} traps={}",
+        l2.len()
+    );
     let max = l1.len().max(l2.len());
     let mut diffs = 0;
     for i in 0..max {

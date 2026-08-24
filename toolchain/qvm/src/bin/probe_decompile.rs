@@ -1,9 +1,7 @@
 use qvm::{build_all, decompile_function, disassemble, fmt_function, load};
 
 fn main() {
-    let path = std::env::args()
-        .nth(2)
-        .unwrap_or_else(|| {
+    let path = std::env::args().nth(2).unwrap_or_else(|| {
         eprintln!("usage: probe_decompile <fn_index> <qvm>");
         std::process::exit(2);
     });

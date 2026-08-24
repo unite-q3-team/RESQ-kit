@@ -2,8 +2,8 @@
 //! following opcode (how the constant is used).
 //! Usage: probe_findconst <path.qvm> <value> [limit]
 
-use qvm::{disassemble, load};
 use qvm::Opcode;
+use qvm::{disassemble, load};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -19,7 +19,10 @@ fn main() {
             } else {
                 "<end>".into()
             };
-            println!("insn {:6} (addr 0x{:x})  CONST {v} -> next {}", i, ins.addr, nxt);
+            println!(
+                "insn {:6} (addr 0x{:x})  CONST {v} -> next {}",
+                i, ins.addr, nxt
+            );
             n += 1;
             if n >= limit {
                 println!("... (limit {limit})");

@@ -76,9 +76,25 @@ pub fn is_terminator(op: Opcode) -> bool {
     use Opcode::*;
     matches!(
         op,
-        Enter | Leave | Jump
-            | Eq | Ne | Lti | Lei | Gti | Gei
-            | Ltu | Leu | Gtu | Geu | Eqf | Nef | Ltf | Lef | Gtf | Gef
+        Enter
+            | Leave
+            | Jump
+            | Eq
+            | Ne
+            | Lti
+            | Lei
+            | Gti
+            | Gei
+            | Ltu
+            | Leu
+            | Gtu
+            | Geu
+            | Eqf
+            | Nef
+            | Ltf
+            | Lef
+            | Gtf
+            | Gef
     )
 }
 
@@ -138,7 +154,10 @@ pub fn simulate_jump_targets(
         // Pattern B: ... LOAD4 ... JUMP with only no-ops in between.
         let mut j = i as isize - 1;
         while j >= start as isize
-            && matches!(insns[j as usize].op, Opcode::Pop | Opcode::Ignore | Opcode::Break)
+            && matches!(
+                insns[j as usize].op,
+                Opcode::Pop | Opcode::Ignore | Opcode::Break
+            )
         {
             j -= 1;
         }
@@ -168,12 +187,7 @@ pub fn simulate_jump_targets(
 /// each of them so the emitter can print `L<t>:` labels — a case target
 /// that lands mid-block would otherwise emit `goto L<t>` with no label
 /// (q3lcc: `undefined label`). See `simulate_jump_targets` for details.
-pub fn switch_table_targets(
-    insns: &[Insn],
-    start: usize,
-    end: usize,
-    data: &[i32],
-) -> Vec<usize> {
+pub fn switch_table_targets(insns: &[Insn], start: usize, end: usize, data: &[i32]) -> Vec<usize> {
     use Opcode::{Add, Const, Gti, Jump, Load4, Lsh, Lti};
     let mut out = Vec::new();
     for i in start..end {
@@ -186,7 +200,10 @@ pub fn switch_table_targets(
         // Before JUMP (allowing no-ops): LOAD4, ADD, CONST base, LSH, CONST 2.
         let mut k = i as isize - 1;
         while k >= start as isize
-            && matches!(insns[k as usize].op, Opcode::Pop | Opcode::Ignore | Opcode::Break)
+            && matches!(
+                insns[k as usize].op,
+                Opcode::Pop | Opcode::Ignore | Opcode::Break
+            )
         {
             k -= 1;
         }
@@ -202,7 +219,7 @@ pub fn switch_table_targets(
             continue;
         }
         let base = insns[bse].operand.unwrap_or(0);
-        if base < 0 || base as usize % 4 != 0 {
+        if base < 0 || !(base as usize).is_multiple_of(4) {
             continue;
         }
         let tbl = base as usize / 4;
@@ -217,7 +234,7 @@ pub fn switch_table_targets(
         let mut steps = 0;
         while cur >= start as isize && steps < 64 {
             let c = cur as usize;
-            if c + 1 < end && c >= start + 1 && insns[c].op == Const {
+            if c + 1 < end && c > start && insns[c].op == Const {
                 let n = &insns[c + 1];
                 let v = insns[c].operand.unwrap_or(0);
                 let t = n.target;
@@ -230,7 +247,9 @@ pub fn switch_table_targets(
             cur -= 1;
             steps += 1;
         }
-        let (Some((l, dlo)), Some((h, dhi))) = (lo, hi) else { continue };
+        let (Some((l, dlo)), Some((h, dhi))) = (lo, hi) else {
+            continue;
+        };
         if dlo != dhi || l > h {
             continue;
         }
@@ -268,11 +287,7 @@ pub fn build_functions(d: &Disassembly) -> Vec<(usize, usize)> {
 }
 
 /// Build the CFG for one function range. Returns `None` for degenerate ranges.
-pub fn build_cfg(
-    d: &Disassembly,
-    fn_range: (usize, usize),
-    data: &[i32],
-) -> Option<CFG> {
+pub fn build_cfg(d: &Disassembly, fn_range: (usize, usize), data: &[i32]) -> Option<CFG> {
     let (start_idx, end_idx) = fn_range;
     if start_idx >= end_idx {
         return None;
@@ -321,7 +336,12 @@ pub fn build_cfg(
     for k in 0..leaders.len() {
         let l = leaders[k];
         let e = leaders.get(k + 1).copied().unwrap_or(end_idx);
-        blocks.push(Block { start: l, end: e, succ: Vec::new(), pred: Vec::new() });
+        blocks.push(Block {
+            start: l,
+            end: e,
+            succ: Vec::new(),
+            pred: Vec::new(),
+        });
     }
     if blocks.is_empty() {
         return None;
@@ -385,7 +405,12 @@ pub fn build_cfg(
         }
     }
 
-    Some(CFG { blocks, entry: 0, start: start_idx, end: end_idx })
+    Some(CFG {
+        blocks,
+        entry: 0,
+        start: start_idx,
+        end: end_idx,
+    })
 }
 
 /// Convenience: functions + their CFGs for a whole QVM.
@@ -405,8 +430,16 @@ mod tests {
 
     fn qvm_from_parts(code: &[u8], data: &[u8], instr_count: i32) -> crate::loader::Qvm {
         let mut f = Vec::new();
-        for v in [0x12721444u32, instr_count as u32, 32u32, code.len() as u32,
-                  32 + code.len() as u32, data.len() as u32, 0u32, 0u32] {
+        for v in [
+            0x12721444u32,
+            instr_count as u32,
+            32u32,
+            code.len() as u32,
+            32 + code.len() as u32,
+            data.len() as u32,
+            0u32,
+            0u32,
+        ] {
             f.extend_from_slice(&v.to_le_bytes());
         }
         f.extend_from_slice(code);
@@ -424,10 +457,10 @@ mod tests {
     fn function_split_at_enter() {
         // 2 functions: ENTER..ENTER and ENTER..end
         let code = [
-            0x03, 4, 0, 0, 0,   // f0: ENTER 4
-            0x04, 4, 0, 0, 0,   //     LEAVE 4
-            0x03, 8, 0, 0, 0,   // f1: ENTER 8
-            0x04, 8, 0, 0, 0,   //     LEAVE 8
+            0x03, 4, 0, 0, 0, // f0: ENTER 4
+            0x04, 4, 0, 0, 0, //     LEAVE 4
+            0x03, 8, 0, 0, 0, // f1: ENTER 8
+            0x04, 8, 0, 0, 0, //     LEAVE 8
         ];
         let (d, _) = one_fn_code(&code, 4);
         let ranges = build_functions(&d);
@@ -437,12 +470,7 @@ mod tests {
     #[test]
     fn jump_const_pattern_a() {
         // #0 ENTER 0; #1 CONST 3; #2 JUMP; #3 LEAVE 0
-        let code = [
-            0x03, 0, 0, 0, 0,
-            0x08, 3, 0, 0, 0,
-            0x0a,
-            0x04, 0, 0, 0, 0,
-        ];
+        let code = [0x03, 0, 0, 0, 0, 0x08, 3, 0, 0, 0, 0x0a, 0x04, 0, 0, 0, 0];
         let (d, q) = one_fn_code(&code, 4);
         let data = q.data_int32();
         let cfg = build_cfg(&d, (0, 4), &data).unwrap();
@@ -460,15 +488,8 @@ mod tests {
         // #0 ENTER 0; #1 CONST 0; #2 CONST 0; #3 LOAD4; #4 JUMP;
         // #5 IGNORE; #6 IGNORE; #7 LEAVE 0 (target); #8 IGNORE
         let code = [
-            0x03, 0, 0, 0, 0,
-            0x08, 0, 0, 0, 0,
-            0x08, 0, 0, 0, 0,
-            0x1d,
-            0x0a,
-            0x01,
-            0x01,
-            0x04, 0, 0, 0, 0,
-            0x01,
+            0x03, 0, 0, 0, 0, 0x08, 0, 0, 0, 0, 0x08, 0, 0, 0, 0, 0x1d, 0x0a, 0x01, 0x01, 0x04, 0,
+            0, 0, 0, 0x01,
         ];
         let data = [0x07, 0x00, 0x00, 0x00]; // little-endian 7
         let q = qvm_from_parts(&code, &data, 9);
@@ -499,28 +520,10 @@ mod tests {
         // data words: [0]=0, [1]=17 (case -1), [2]=20 (case 0), [3]=18 (case 1),
         //              [4]=19 (case 2)
         let code = [
-            0x03, 0, 0, 0, 0,
-            0x09, 4, 0, 0, 0,
-            0x1d,
-            0x08, 0xff, 0xff, 0xff, 0xff,
-            0x0d, 20, 0, 0, 0,
-            0x09, 4, 0, 0, 0,
-            0x1d,
-            0x08, 2, 0, 0, 0,
-            0x0f, 20, 0, 0, 0,
-            0x09, 4, 0, 0, 0,
-            0x1d,
-            0x08, 2, 0, 0, 0,
-            0x32,
-            0x08, 8, 0, 0, 0,
-            0x26,
-            0x1d,
-            0x0a,
-            0x01,
-            0x04, 0, 0, 0, 0,
-            0x04, 0, 0, 0, 0,
-            0x04, 0, 0, 0, 0,
-            0x01,
+            0x03, 0, 0, 0, 0, 0x09, 4, 0, 0, 0, 0x1d, 0x08, 0xff, 0xff, 0xff, 0xff, 0x0d, 20, 0, 0,
+            0, 0x09, 4, 0, 0, 0, 0x1d, 0x08, 2, 0, 0, 0, 0x0f, 20, 0, 0, 0, 0x09, 4, 0, 0, 0, 0x1d,
+            0x08, 2, 0, 0, 0, 0x32, 0x08, 8, 0, 0, 0, 0x26, 0x1d, 0x0a, 0x01, 0x04, 0, 0, 0, 0,
+            0x04, 0, 0, 0, 0, 0x04, 0, 0, 0, 0, 0x01,
         ];
         let data = [
             0x00, 0x00, 0x00, 0x00, // word0 = 0
@@ -544,12 +547,10 @@ mod tests {
     fn comparison_edge_both_ways() {
         // #0 ENTER 0; #1 CONST 1; #2 CONST 2; #3 GTI 5; #4 LEAVE 0; #5 LEAVE 0
         let code = [
-            0x03, 0, 0, 0, 0,
-            0x08, 1, 0, 0, 0,
-            0x08, 2, 0, 0, 0,
-            0x0f, 5, 0, 0, 0,   // GTI -> #5
-            0x04, 0, 0, 0, 0,   // #4 LEAVE (fallthrough)
-            0x04, 0, 0, 0, 0,   // #5 LEAVE (target)
+            0x03, 0, 0, 0, 0, 0x08, 1, 0, 0, 0, 0x08, 2, 0, 0, 0, 0x0f, 5, 0, 0,
+            0, // GTI -> #5
+            0x04, 0, 0, 0, 0, // #4 LEAVE (fallthrough)
+            0x04, 0, 0, 0, 0, // #5 LEAVE (target)
         ];
         let (d, q) = one_fn_code(&code, 6);
         let data = q.data_int32();

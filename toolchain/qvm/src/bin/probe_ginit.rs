@@ -7,8 +7,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use qvm::{build_functions, disassemble, load, Opcode};
 use qvm::probe_common::{make_handler_ctrl, TrapLog};
+use qvm::{build_functions, disassemble, load, Opcode};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -48,7 +48,10 @@ fn dump_player_spawns(mem: &qvm::Memory) {
         }
         let a = mem.masked(addr);
         let rest = &mem.data[a..];
-        let n = rest.iter().position(|&b| b == 0).unwrap_or(rest.len().min(64));
+        let n = rest
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(rest.len().min(64));
         String::from_utf8_lossy(&rest[..n]).into_owned()
     };
     let num = load4(1064020);
@@ -97,7 +100,10 @@ fn store_f32(mem: &mut qvm::Memory, addr: i32, v: f32) {
 
 fn find_enter(insns: &[qvm::Insn], pcs: &[usize]) -> Option<usize> {
     pcs.iter().copied().find(|&pc| {
-        insns.get(pc).map(|i| i.op == Opcode::Enter).unwrap_or(false)
+        insns
+            .get(pc)
+            .map(|i| i.op == Opcode::Enter)
+            .unwrap_or(false)
     })
 }
 
@@ -107,9 +113,7 @@ fn find_enter(insns: &[qvm::Insn], pcs: &[usize]) -> Option<usize> {
 fn simulate_player_on_pads(emu: &mut qvm::Emu, d: &qvm::Disassembly) {
     let telefrag_fn = find_enter(&d.insns, &[118302, 155521]);
     let select_fn = find_enter(&d.insns, &[118719, 156004]);
-    println!(
-        "telefrag_fn={telefrag_fn:?} select_fn={select_fn:?}"
-    );
+    println!("telefrag_fn={telefrag_fn:?} select_fn={select_fn:?}");
     let Some(telefrag_fn) = telefrag_fn else {
         println!("no SpotWouldTelefrag entry");
         return;
@@ -168,7 +172,7 @@ fn simulate_player_on_pads(emu: &mut qvm::Emu, d: &qvm::Disassembly) {
     println!("using clients array @{clients}");
     let scratch = (emu.mem.data_mask as i32 + 1) - 65536 - 128;
 
-    for (pi, pent, px, py, pz, pflags) in &pads {
+    for (pi, _pent, px, py, pz, pflags) in &pads {
         // client 0 occupies this pad
         emu.mem.store4(220232 + 516, clients);
         emu.mem.store4(220232 + 520, 1);
@@ -182,16 +186,14 @@ fn simulate_player_on_pads(emu: &mut qvm::Emu, d: &qvm::Disassembly) {
         emu.mem.store4(1064080, 1);
         emu.mem.store4(1064092, 0); // sortedClients[0] = entity 0
 
-        println!(
-            "--- player on pad ent[{pi}] ({px:.0},{py:.0},{pz:.0}) flags={pflags} ---"
-        );
+        println!("--- player on pad ent[{pi}] ({px:.0},{py:.0},{pz:.0}) flags={pflags} ---");
         for (si, sent, sx, sy, sz, sflags) in &pads {
             emu.stats.steps = 0;
             emu.set_max_steps(50_000);
             match emu.call(telefrag_fn, &[*sent]) {
-                Ok(v) => println!(
-                    "  telefrag ent[{si}] ({sx:.0},{sy:.0},{sz:.0}) flags={sflags} -> {v}"
-                ),
+                Ok(v) => {
+                    println!("  telefrag ent[{si}] ({sx:.0},{sy:.0},{sz:.0}) flags={sflags} -> {v}")
+                }
                 Err(e) => println!("  telefrag ent[{si}] ERR {e:?}"),
             }
         }
@@ -226,12 +228,16 @@ fn simulate_player_on_pads(emu: &mut qvm::Emu, d: &qvm::Disassembly) {
             picks.first().map(|p| (p.1, p.2))
         );
         if n_ok == 0 {
-            println!("  ALL PICKS NOBOTS: {}", picks.iter().map(|p| p.1.to_string()).collect::<Vec<_>>().join(","));
+            println!(
+                "  ALL PICKS NOBOTS: {}",
+                picks
+                    .iter()
+                    .map(|p| p.1.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
         } else {
-            let seq: String = picks
-                .iter()
-                .map(|p| if p.2 { 'N' } else { 'o' })
-                .collect();
+            let seq: String = picks.iter().map(|p| if p.2 { 'N' } else { 'o' }).collect();
             println!("  pick seq: {seq}");
         }
     }
@@ -253,9 +259,9 @@ fn simulate_player_on_pads(emu: &mut qvm::Emu, d: &qvm::Disassembly) {
         emu.stats.steps = 0;
         emu.set_max_steps(50_000);
         match emu.call(telefrag_fn, &[*sent]) {
-            Ok(v) => println!(
-                "  telefrag ent[{si}] ({sx:.0},{sy:.0},{sz:.0}) flags={sflags} -> {v}"
-            ),
+            Ok(v) => {
+                println!("  telefrag ent[{si}] ({sx:.0},{sy:.0},{sz:.0}) flags={sflags} -> {v}")
+            }
             Err(e) => println!("  telefrag ent[{si}] ERR {e:?}"),
         }
     }
@@ -291,10 +297,7 @@ fn simulate_player_on_pads(emu: &mut qvm::Emu, d: &qvm::Disassembly) {
             }
         }
     }
-    let seq: String = picks
-        .iter()
-        .map(|p| if p.2 { 'N' } else { 'o' })
-        .collect();
+    let seq: String = picks.iter().map(|p| if p.2 { 'N' } else { 'o' }).collect();
     println!(
         "  avoid(0,0,0) x{} seq={seq} first=({:.0},{:.0}) nobots={}",
         picks.len(),
@@ -322,9 +325,9 @@ fn simulate_player_on_pads(emu: &mut qvm::Emu, d: &qvm::Disassembly) {
         emu.stats.steps = 0;
         emu.set_max_steps(50_000);
         match emu.call(telefrag_fn, &[*sent]) {
-            Ok(v) => println!(
-                "  telefrag2 ent[{si}] ({sx:.0},{sy:.0},{sz:.0}) flags={sflags} -> {v}"
-            ),
+            Ok(v) => {
+                println!("  telefrag2 ent[{si}] ({sx:.0},{sy:.0},{sz:.0}) flags={sflags} -> {v}")
+            }
             Err(e) => println!("  telefrag2 ent[{si}] ERR {e:?}"),
         }
     }

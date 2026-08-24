@@ -14,8 +14,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use qvm::probe_common::{TrapLog, make_handler_snap};
-use qvm::{Emu, build_functions, disassemble, load};
+use qvm::probe_common::{make_handler_snap, TrapLog};
+use qvm::{build_functions, disassemble, load, Emu};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -60,7 +60,10 @@ fn main() {
                     .map(|p| p.to_string())
                     .collect::<Vec<_>>()
                     .join(" ");
-                eprintln!("    [orig] last {} pcs before first trap_Error: {s}", r.len());
+                eprintln!(
+                    "    [orig] last {} pcs before first trap_Error: {s}",
+                    r.len()
+                );
             }
             inner(mem, num, a)
         });
@@ -75,10 +78,7 @@ fn main() {
             if pc == 0 && prev != 0 {
                 // Re-entry into vmMain from somewhere (CALL/JUMP/LEAVE to insn 0).
                 // Dump the branching site + frame pointer + return stack top.
-                let ret = e
-                    .mem()
-                    .read_i32_raw(e.program_stack())
-                    .unwrap_or(i32::MIN);
+                let ret = e.mem().read_i32_raw(e.program_stack()).unwrap_or(i32::MIN);
                 eprintln!(
                     "    [orig] re-enter vmMain from insn {} (ps={}, ret=[{}]={})",
                     prev,
@@ -96,7 +96,13 @@ fn main() {
             }
         }));
         emu.set_max_steps(20_000_000);
-        Side { emu, logs, state: hs.state, fired, pc_cnt }
+        Side {
+            emu,
+            logs,
+            state: hs.state,
+            fired,
+            pc_cnt,
+        }
     }
 
     let mut s1 = make_side(&d1.insns, q1);
@@ -134,12 +140,14 @@ fn main() {
         let mut le = m.load4(SENT);
         let mut guard = 0;
         while le != SENT && le != 0 && guard < 4096 {
-            let leT = m.load4(le + 8);
+            let le_t = m.load4(le + 8);
             let st = m.load4(le + 16);
             let end = m.load4(le + 20);
             let f0 = m.load4(le);
             let f4 = m.load4(le + 4);
-            out.push(format!("{le:#x}:T{leT},st{st},end{end},f0={f0:#x},f4={f4:#x}"));
+            out.push(format!(
+                "{le:#x}:T{le_t},st{st},end{end},f0={f0:#x},f4={f4:#x}"
+            ));
             le = m.load4(le);
             guard += 1;
         }
@@ -236,12 +244,19 @@ fn main() {
         let h1 = hist(&s1.logs.borrow()[b1..len1]);
         let h2 = hist(&s2.logs.borrow()[b2..len2]);
         let fmt_h = |h: &[(u32, usize)]| -> String {
-            h.iter().map(|(n, c)| format!("{n}x{c}")).collect::<Vec<_>>().join(" ")
+            h.iter()
+                .map(|(n, c)| format!("{n}x{c}"))
+                .collect::<Vec<_>>()
+                .join(" ")
         };
         if h1 != h2 {
             eprintln!("  [hist] orig: {}", fmt_h(&h1));
             eprintln!("  [hist] rebld: {}", fmt_h(&h2));
-            let dump41 = |logs: &[TrapLog], pcs: &[usize], funcs: &[(usize, usize)], mem: &qvm::emu::Memory| -> String {
+            let dump41 = |logs: &[TrapLog],
+                          pcs: &[usize],
+                          funcs: &[(usize, usize)],
+                          mem: &qvm::emu::Memory|
+             -> String {
                 logs.iter()
                     .zip(pcs)
                     .filter(|(t, _)| t.num == 41)
@@ -259,13 +274,32 @@ fn main() {
                     .collect::<Vec<_>>()
                     .join(",")
             };
-            eprintln!("  [t41] orig: fn[{}]", dump41(&s1.logs.borrow()[b1..len1], &s1.emu.trap_insns, &funcs1, s1.emu.mem()));
-            eprintln!("  [t41] rebld: fn[{}]", dump41(&s2.logs.borrow()[b2..len2], &s2.emu.trap_insns, &funcs2, s2.emu.mem()));
+            eprintln!(
+                "  [t41] orig: fn[{}]",
+                dump41(
+                    &s1.logs.borrow()[b1..len1],
+                    &s1.emu.trap_insns,
+                    &funcs1,
+                    s1.emu.mem()
+                )
+            );
+            eprintln!(
+                "  [t41] rebld: fn[{}]",
+                dump41(
+                    &s2.logs.borrow()[b2..len2],
+                    &s2.emu.trap_insns,
+                    &funcs2,
+                    s2.emu.mem()
+                )
+            );
         }
         // Diagnose the orig CG_Error spin: show the distinct trap_Error / trap_Print
         // messages (and how often each repeats) for this frame, plus the CALL pc
         // (`emu.trap_insns` aligns 1:1 with the trap logs of this call).
-        for (tag, seg) in [("orig", &s1.logs.borrow()[b1..len1]), ("rebld", &s2.logs.borrow()[b2..len2])] {
+        for (tag, seg) in [
+            ("orig", &s1.logs.borrow()[b1..len1]),
+            ("rebld", &s2.logs.borrow()[b2..len2]),
+        ] {
             let mut msgs: Vec<(String, usize)> = Vec::new();
             for t in seg.iter().filter(|t| t.num == 0 || t.num == 1) {
                 let m = t.args.get(1).cloned().unwrap_or_default();
@@ -282,7 +316,11 @@ fn main() {
                     .join(" ");
                 eprintln!("  [{tag}] trap0/1 msgs: {joined}");
             }
-            let pcs = if tag == "orig" { &s1.emu.trap_insns } else { &s2.emu.trap_insns };
+            let pcs = if tag == "orig" {
+                &s1.emu.trap_insns
+            } else {
+                &s2.emu.trap_insns
+            };
             if pcs.len() == seg.len() {
                 let mut sites: Vec<(usize, usize)> = Vec::new();
                 for (t, pc) in seg.iter().zip(pcs) {

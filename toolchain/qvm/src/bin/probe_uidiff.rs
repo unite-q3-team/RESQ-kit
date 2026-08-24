@@ -15,8 +15,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use qvm::probe_common::{TrapLog, make_handler};
-use qvm::{Emu, build_functions, disassemble, load};
+use qvm::probe_common::{make_handler, TrapLog};
+use qvm::{build_functions, disassemble, load, Emu};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -33,95 +33,92 @@ fn main() {
     //   msg 8 -> fn_5428(p1) (UI_CONSOLE_COMMAND)
     //   msg 2 -> fn_5606()  (UI_SHUTDOWN)
     let seq: &[(i32, i32, i32, i32)] = &[
-        (0, 0, 0, 0),    // UI_GETAPIVERSION
-        (1, 0, 0, 0),    // UI_INIT
-        (7, 1, 0, 0),    // UI_SET_ACTIVE_MENU: UIMENU_MAIN
-        (5, 0, 0, 0),    // UI_REFRESH
-        (3, 13, 1, 0),   // UI_KEY_EVENT: Enter down
-        (3, 133, 1, 0),  // UI_KEY_EVENT: K_DOWNARROW down
-        (3, 97, 1, 0),   // UI_KEY_EVENT: ASCII 'a' down
+        (0, 0, 0, 0),   // UI_GETAPIVERSION
+        (1, 0, 0, 0),   // UI_INIT
+        (7, 1, 0, 0),   // UI_SET_ACTIVE_MENU: UIMENU_MAIN
+        (5, 0, 0, 0),   // UI_REFRESH
+        (3, 13, 1, 0),  // UI_KEY_EVENT: Enter down
+        (3, 133, 1, 0), // UI_KEY_EVENT: K_DOWNARROW down
+        (3, 97, 1, 0),  // UI_KEY_EVENT: ASCII 'a' down
         // Exercise the historic main-menu crash path: select Exit, move from
         // the default "Yes" to "No", then confirm. A corrupt callback used to
         // send this indirect call into unrelated UI code.
-        (7, 1, 0, 0),    // UI_SET_ACTIVE_MENU: UIMENU_MAIN
-        (3, 133, 1, 0),  // Down: Multiplayer
-        (3, 133, 1, 0),  // Down: Setup
-        (3, 133, 1, 0),  // Down: Demos
-        (3, 133, 1, 0),  // Down: Exit
-        (3, 13, 1, 0),   // Enter: open exit confirmation
-        (3, 133, 1, 0),  // Down: select No
-        (3, 13, 1, 0),   // Enter: dismiss confirmation
+        (7, 1, 0, 0),   // UI_SET_ACTIVE_MENU: UIMENU_MAIN
+        (3, 133, 1, 0), // Down: Multiplayer
+        (3, 133, 1, 0), // Down: Setup
+        (3, 133, 1, 0), // Down: Demos
+        (3, 133, 1, 0), // Down: Exit
+        (3, 13, 1, 0),  // Enter: open exit confirmation
+        (3, 133, 1, 0), // Down: select No
+        (3, 13, 1, 0),  // Enter: dismiss confirmation
         // Team menu initializes the JOIN RED/JOIN BLUE string and callback
         // fields that previously suffered entry-index/string collisions.
-        (7, 2, 0, 0),    // UI_SET_ACTIVE_MENU: UIMENU_TEAM
-        (5, 0, 0, 0),    // UI_REFRESH: team menu
-        (3, 133, 1, 0),  // Down: move team-menu cursor
-        (3, 13, 1, 0),   // Enter: activate focused team item
+        (7, 2, 0, 0),   // UI_SET_ACTIVE_MENU: UIMENU_TEAM
+        (5, 0, 0, 0),   // UI_REFRESH: team menu
+        (3, 133, 1, 0), // Down: move team-menu cursor
+        (3, 13, 1, 0),  // Enter: activate focused team item
         // Follow the main-menu Setup path, the parent of the System/Sound UI.
-        (7, 1, 0, 0),    // UI_SET_ACTIVE_MENU: UIMENU_MAIN
-        (3, 133, 1, 0),  // Down: Multiplayer
-        (3, 133, 1, 0),  // Down: Setup
-        (3, 13, 1, 0),   // Enter: open Setup
-        (5, 0, 0, 0),    // UI_REFRESH: setup menu
+        (7, 1, 0, 0),   // UI_SET_ACTIVE_MENU: UIMENU_MAIN
+        (3, 133, 1, 0), // Down: Multiplayer
+        (3, 133, 1, 0), // Down: Setup
+        (3, 13, 1, 0),  // Enter: open Setup
+        (5, 0, 0, 0),   // UI_REFRESH: setup menu
         // Player Setup -> models list (reported live crash: navigating into
         // the model list from Setup->Player).
-        (7, 1, 0, 0),    // UI_SET_ACTIVE_MENU: UIMENU_MAIN
-        (3, 133, 1, 0),  // Down: Multiplayer
-        (3, 133, 1, 0),  // Down: Setup
-        (3, 13, 1, 0),   // Enter: open Setup (lands on Player, item 0)
-        (5, 0, 0, 0),    // UI_REFRESH: setup menu
-        (3, 13, 1, 0),   // Enter: open Player Setup
-        (5, 0, 0, 0),    // UI_REFRESH: player setup menu
-        (3, 133, 1, 0),  // Down 1 in Player Setup
-        (3, 133, 1, 0),  // Down 2
-        (3, 133, 1, 0),  // Down 3
-        (3, 133, 1, 0),  // Down 4 (models list widget, guess)
-        (3, 13, 1, 0),   // Enter: open/select on models widget
-        (5, 0, 0, 0),    // UI_REFRESH
-        (3, 132, 1, 0),  // K_UPARROW: cycle model list (if it's a spin control)
-        (3, 135, 1, 0),  // K_RIGHTARROW: cycle model list right
+        (7, 1, 0, 0),   // UI_SET_ACTIVE_MENU: UIMENU_MAIN
+        (3, 133, 1, 0), // Down: Multiplayer
+        (3, 133, 1, 0), // Down: Setup
+        (3, 13, 1, 0),  // Enter: open Setup (lands on Player, item 0)
+        (5, 0, 0, 0),   // UI_REFRESH: setup menu
+        (3, 13, 1, 0),  // Enter: open Player Setup
+        (5, 0, 0, 0),   // UI_REFRESH: player setup menu
+        (3, 133, 1, 0), // Down 1 in Player Setup
+        (3, 133, 1, 0), // Down 2
+        (3, 133, 1, 0), // Down 3
+        (3, 133, 1, 0), // Down 4 (models list widget, guess)
+        (3, 13, 1, 0),  // Enter: open/select on models widget
+        (5, 0, 0, 0),   // UI_REFRESH
+        (3, 132, 1, 0), // K_UPARROW: cycle model list (if it's a spin control)
+        (3, 135, 1, 0), // K_RIGHTARROW: cycle model list right
         (3, 135, 1, 0),
         (3, 135, 1, 0),
-        (5, 0, 0, 0),    // UI_REFRESH
-
+        (5, 0, 0, 0), // UI_REFRESH
         // Exact live-crash repro from the user: Setup -> System(Graphics) ->
         // Display -> Sound -> Network -> back to Sound (Up+Enter). Reported
         // to crash with "Menu_Init: unknown type 0" / bounds-overflow.
-        (7, 1, 0, 0),    // UI_SET_ACTIVE_MENU: UIMENU_MAIN
-        (3, 133, 1, 0),  // Down
-        (3, 133, 1, 0),  // Down: Setup
-        (3, 13, 1, 0),   // Enter: open Setup (Player)
-        (3, 133, 1, 0),  // Down: Controls
-        (3, 133, 1, 0),  // Down: System
-        (3, 13, 1, 0),   // Enter: open System (Graphics tab)
-        (5, 0, 0, 0),    // UI_REFRESH
-        (3, 133, 1, 0),  // Down
-        (3, 13, 1, 0),   // Enter: Display tab
-        (5, 0, 0, 0),    // UI_REFRESH
-        (3, 133, 1, 0),  // Down
-        (3, 13, 1, 0),   // Enter: Sound tab
-        (5, 0, 0, 0),    // UI_REFRESH
-        (3, 133, 1, 0),  // Down
-        (3, 13, 1, 0),   // Enter: Network tab
-        (5, 0, 0, 0),    // UI_REFRESH
-        (3, 132, 1, 0),  // Up
-        (3, 13, 1, 0),   // Enter: back to Sound tab -- reported crash here
-        (5, 0, 0, 0),    // UI_REFRESH
-
+        (7, 1, 0, 0),   // UI_SET_ACTIVE_MENU: UIMENU_MAIN
+        (3, 133, 1, 0), // Down
+        (3, 133, 1, 0), // Down: Setup
+        (3, 13, 1, 0),  // Enter: open Setup (Player)
+        (3, 133, 1, 0), // Down: Controls
+        (3, 133, 1, 0), // Down: System
+        (3, 13, 1, 0),  // Enter: open System (Graphics tab)
+        (5, 0, 0, 0),   // UI_REFRESH
+        (3, 133, 1, 0), // Down
+        (3, 13, 1, 0),  // Enter: Display tab
+        (5, 0, 0, 0),   // UI_REFRESH
+        (3, 133, 1, 0), // Down
+        (3, 13, 1, 0),  // Enter: Sound tab
+        (5, 0, 0, 0),   // UI_REFRESH
+        (3, 133, 1, 0), // Down
+        (3, 13, 1, 0),  // Enter: Network tab
+        (5, 0, 0, 0),   // UI_REFRESH
+        (3, 132, 1, 0), // Up
+        (3, 13, 1, 0),  // Enter: back to Sound tab -- reported crash here
+        (5, 0, 0, 0),   // UI_REFRESH
         // Setup -> Game Options (crosshair ownerdraw preview).
         // Setup order: Player, Controls, System, Game Options, CD Key.
-        (7, 1, 0, 0),    // UI_SET_ACTIVE_MENU: UIMENU_MAIN
-        (3, 133, 1, 0),  // Down: Multiplayer
-        (3, 133, 1, 0),  // Down: Setup
-        (3, 13, 1, 0),   // Enter: Setup (Player)
-        (3, 133, 1, 0),  // Down: Controls
-        (3, 133, 1, 0),  // Down: System
-        (3, 133, 1, 0),  // Down: Game Options
-        (3, 13, 1, 0),   // Enter: open Game Options
-        (5, 0, 0, 0),    // UI_REFRESH: Game Options (RegisterShader + DrawStretchPic)
-
-        (8, 0, 0, 0),    // UI_CONSOLE_COMMAND
-        (2, 0, 0, 0),    // UI_SHUTDOWN
+        (7, 1, 0, 0),   // UI_SET_ACTIVE_MENU: UIMENU_MAIN
+        (3, 133, 1, 0), // Down: Multiplayer
+        (3, 133, 1, 0), // Down: Setup
+        (3, 13, 1, 0),  // Enter: Setup (Player)
+        (3, 133, 1, 0), // Down: Controls
+        (3, 133, 1, 0), // Down: System
+        (3, 133, 1, 0), // Down: Game Options
+        (3, 13, 1, 0),  // Enter: open Game Options
+        (5, 0, 0, 0),   // UI_REFRESH: Game Options (RegisterShader + DrawStretchPic)
+        (8, 0, 0, 0),   // UI_CONSOLE_COMMAND
+        (2, 0, 0, 0),   // UI_SHUTDOWN
     ];
     let names = [
         "UI_GETAPIVERSION",
@@ -239,16 +236,25 @@ fn main() {
 
     let trace_cur_step: Rc<RefCell<usize>> = Rc::new(RefCell::new(0));
     if let Ok(targets_s) = std::env::var("QVM_TRACE_CALLS") {
-        let targets: Vec<usize> = targets_s.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        let targets: Vec<usize> = targets_s
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
         let cur_step2 = trace_cur_step.clone();
         let prev_pc = Rc::new(RefCell::new(usize::MAX));
         let mut tmp = Emu::new(&d2.insns, q2);
         std::mem::swap(&mut tmp, &mut s2.emu);
-        let trace_step_filter: Option<usize> = std::env::var("QVM_TRACE_STEP").ok().and_then(|s| s.parse().ok());
+        let trace_step_filter: Option<usize> = std::env::var("QVM_TRACE_STEP")
+            .ok()
+            .and_then(|s| s.parse().ok());
         let insns2 = d2.insns.clone();
         s2.emu = tmp.with_step_hook(Box::new(move |e, pc| {
             if targets.contains(&pc) {
-                println!("TRACE step={} pc={pc} prev_pc={}", *cur_step2.borrow(), *prev_pc.borrow());
+                println!(
+                    "TRACE step={} pc={pc} prev_pc={}",
+                    *cur_step2.borrow(),
+                    *prev_pc.borrow()
+                );
             }
             if trace_step_filter == Some(*cur_step2.borrow()) {
                 use qvm::opcodes::Opcode;
@@ -271,8 +277,8 @@ fn main() {
         s2.emu.set_max_steps(20_000_000);
     }
 
-    for (_ci, cmd) in seq.iter().copied().enumerate() {
-        *trace_cur_step.borrow_mut() = _ci;
+    for (ci, cmd) in seq.iter().copied().enumerate() {
+        *trace_cur_step.borrow_mut() = ci;
         let (r1, e1) = match s1.emu.call(start1, &[cmd.0, cmd.1, cmd.2, cmd.3]) {
             Ok(v) => (v, None),
             Err(e) => (i32::MIN, Some(format!("{e}"))),
@@ -331,8 +337,12 @@ fn main() {
             let (x, y) = (l1.get(j), l2.get(j));
             if x != y {
                 diffs += 1;
-                let xi = t1.get(j).map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns1, i)));
-                let yi = t2.get(j).map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns2, i)));
+                let xi = t1
+                    .get(j)
+                    .map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns1, i)));
+                let yi = t2
+                    .get(j)
+                    .map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns2, i)));
                 diff_lines.push(format!(
                     "      #{j}: orig {:?} {} vs rebuilt {:?} {}",
                     x.map(|t| (t.name.clone(), t.args.clone())),
@@ -398,12 +408,20 @@ fn main() {
             );
             print!("      shaders@260028: orig=[");
             for i in 0..10 {
-                print!("{}{}", s1.emu.mem.load4(260028 + i * 4), if i < 9 { "," } else { "" });
+                print!(
+                    "{}{}",
+                    s1.emu.mem.load4(260028 + i * 4),
+                    if i < 9 { "," } else { "" }
+                );
             }
             println!("]");
             print!("      shaders@260028: rebld=[");
             for i in 0..10 {
-                print!("{}{}", s2.emu.mem.load4(260028 + i * 4), if i < 9 { "," } else { "" });
+                print!(
+                    "{}{}",
+                    s2.emu.mem.load4(260028 + i * 4),
+                    if i < 9 { "," } else { "" }
+                );
             }
             println!("]");
         }

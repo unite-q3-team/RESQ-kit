@@ -29,15 +29,31 @@ const EXIT: usize = usize::MAX;
 #[derive(Debug, Clone)]
 pub enum Elem {
     /// Straight-line block `idx` (its body statements).
-    Block { idx: usize, body: Vec<Stmt> },
-    If { cond: Expr, then: Vec<Elem>, else_: Vec<Elem> },
-    While { cond: Expr, body: Vec<Elem> },
-    DoWhile { cond: Expr, body: Vec<Elem> },
+    Block {
+        idx: usize,
+        body: Vec<Stmt>,
+    },
+    If {
+        cond: Expr,
+        then: Vec<Elem>,
+        else_: Vec<Elem>,
+    },
+    While {
+        cond: Expr,
+        body: Vec<Elem>,
+    },
+    DoWhile {
+        cond: Expr,
+        body: Vec<Elem>,
+    },
     Return(Option<Expr>),
     /// Residual unstructured jump.
     Goto(usize),
     /// Residual conditional jump.
-    IfGoto { cond: Expr, target: usize },
+    IfGoto {
+        cond: Expr,
+        target: usize,
+    },
     /// Resolved jump table with per-case structured bodies.
     Switch {
         sel: Expr,
@@ -57,14 +73,25 @@ pub enum CaseKind {
     /// Structured body; `break_` says whether a trailing `break;` is needed.
     /// `also_default` merges the bounds-check default into this case's label
     /// (`case N: default:`) because the default target equals this target.
-    Inline { body: Vec<Elem>, break_: bool, also_default: bool },
+    Inline {
+        body: Vec<Elem>,
+        break_: bool,
+        also_default: bool,
+    },
     /// The target block could not be inlined; jump to its label.
     Goto(usize),
 }
 
 enum LoopKind {
-    While { cond: Expr, body_entry: usize, exit: usize },
-    DoWhile { cond: Expr, test: usize },
+    While {
+        cond: Expr,
+        body_entry: usize,
+        exit: usize,
+    },
+    DoWhile {
+        cond: Expr,
+        test: usize,
+    },
 }
 
 /// Structuring state: block graph, dominators, post-dominators.
@@ -296,7 +323,11 @@ impl Structure {
                 let f = cur + 1;
                 let ls = self.natural_loop(cur);
                 if ls.contains(&t) && !ls.contains(&f) {
-                    Some(LoopKind::While { cond: cond.clone(), body_entry: t, exit: f })
+                    Some(LoopKind::While {
+                        cond: cond.clone(),
+                        body_entry: t,
+                        exit: f,
+                    })
                 } else if ls.contains(&f) && !ls.contains(&t) {
                     Some(LoopKind::While {
                         cond: negate_cond(cond),
@@ -318,7 +349,10 @@ impl Structure {
                     }
                     if let Terminator::IfGoto { cond, target } = &self.terms[p] {
                         if self.by_start.get(target).copied() == Some(cur) {
-                            return Some(LoopKind::DoWhile { cond: cond.clone(), test: p });
+                            return Some(LoopKind::DoWhile {
+                                cond: cond.clone(),
+                                test: p,
+                            });
                         }
                     }
                 }
@@ -335,12 +369,19 @@ impl Structure {
         while cur < self.n && cur != stop && !self.emitted[cur] {
             if let Some(lk) = self.loop_kind(cur) {
                 match lk {
-                    LoopKind::While { cond, body_entry, exit } => {
+                    LoopKind::While {
+                        cond,
+                        body_entry,
+                        exit,
+                    } => {
                         let hdr = self.bodies[cur].clone();
                         self.emitted[cur] = true;
                         let body = self.structure(body_entry, cur);
                         if !hdr.is_empty() {
-                            out.push(Elem::Block { idx: cur, body: hdr });
+                            out.push(Elem::Block {
+                                idx: cur,
+                                body: hdr,
+                            });
                         }
                         out.push(Elem::While { cond, body });
                         cur = exit;
@@ -360,7 +401,10 @@ impl Structure {
                 }
             }
             if !self.bodies[cur].is_empty() {
-                out.push(Elem::Block { idx: cur, body: self.bodies[cur].clone() });
+                out.push(Elem::Block {
+                    idx: cur,
+                    body: self.bodies[cur].clone(),
+                });
             }
             let term = self.terms[cur].clone();
             match term {
@@ -379,7 +423,11 @@ impl Structure {
                     continue;
                 }
                 Terminator::IfGoto { cond, target } => {
-                    let merge = if self.ipdom[cur] == self.n { EXIT } else { self.ipdom[cur] };
+                    let merge = if self.ipdom[cur] == self.n {
+                        EXIT
+                    } else {
+                        self.ipdom[cur]
+                    };
                     let then_entry = self.by_start.get(&target).copied().unwrap_or(EXIT);
                     let else_entry = cur + 1;
                     // Edges that would re-enter the enclosing region (loop
@@ -406,11 +454,23 @@ impl Structure {
                         };
                         if !(then_src.is_empty() && else_src.is_empty()) {
                             if else_src.is_empty() {
-                                out.push(Elem::If { cond, then: then_src, else_: Vec::new() });
+                                out.push(Elem::If {
+                                    cond,
+                                    then: then_src,
+                                    else_: Vec::new(),
+                                });
                             } else if then_src.is_empty() {
-                                out.push(Elem::If { cond: negate_cond(&cond), then: else_src, else_: Vec::new() });
+                                out.push(Elem::If {
+                                    cond: negate_cond(&cond),
+                                    then: else_src,
+                                    else_: Vec::new(),
+                                });
                             } else {
-                                out.push(Elem::If { cond, then: then_src, else_: else_src });
+                                out.push(Elem::If {
+                                    cond,
+                                    then: then_src,
+                                    else_: else_src,
+                                });
                             }
                         }
                         cur = merge;
@@ -425,7 +485,11 @@ impl Structure {
                     }
                     break;
                 }
-        Terminator::Switch { sel, cases, default } => {
+                Terminator::Switch {
+                    sel,
+                    cases,
+                    default,
+                } => {
                     let (sw, def) = self.emit_switch(cur, *sel, &cases, default);
                     self.emitted[cur] = true;
                     out.push(sw);
@@ -451,7 +515,13 @@ impl Structure {
         out
     }
 
-    fn emit_switch(&mut self, cur: usize, sel: Expr, cases: &[(i32, usize)], bounds_default: Option<usize>) -> (Elem, Option<usize>) {
+    fn emit_switch(
+        &mut self,
+        cur: usize,
+        sel: Expr,
+        cases: &[(i32, usize)],
+        bounds_default: Option<usize>,
+    ) -> (Elem, Option<usize>) {
         let default = switch_default_block(cases, &self.by_start);
 
         // Common exit of all case bodies: the single block every case target
@@ -471,7 +541,11 @@ impl Structure {
         }
         let merge = if !case_exits.is_empty() && case_exits.iter().all(|&x| x == case_exits[0]) {
             let m = case_exits[0];
-            if default != Some(m) { Some(m) } else { None }
+            if default != Some(m) {
+                Some(m)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -511,7 +585,14 @@ impl Structure {
                     if also_default {
                         bound_group_inlined = true;
                     }
-                    out_cases.push((vs, CaseKind::Inline { body, break_: needs_break, also_default }));
+                    out_cases.push((
+                        vs,
+                        CaseKind::Inline {
+                            body,
+                            break_: needs_break,
+                            also_default,
+                        },
+                    ));
                 }
             }
         }
@@ -541,14 +622,25 @@ impl Structure {
                                 | Some(Elem::Unresolved(_))
                         );
                         continue_at = merge.or(bounds_default);
-                        Some(CaseKind::Inline { body, break_: needs_break, also_default: false })
+                        Some(CaseKind::Inline {
+                            body,
+                            break_: needs_break,
+                            also_default: false,
+                        })
                     }
                 },
             }
         };
         let _ = cur;
 
-        (Elem::Switch { sel, cases: out_cases, default: out_default }, continue_at)
+        (
+            Elem::Switch {
+                sel,
+                cases: out_cases,
+                default: out_default,
+            },
+            continue_at,
+        )
     }
 
     /// Blocks not emitted by the structuring recursion (dead after structure
@@ -565,7 +657,10 @@ impl Structure {
 
 /// The in-table default block of a switch: the target that occurs most often
 /// (>= 2), the shared case body used by the `default:` path.
-pub fn switch_default_block(cases: &[(i32, usize)], by_start: &HashMap<usize, usize>) -> Option<usize> {
+pub fn switch_default_block(
+    cases: &[(i32, usize)],
+    by_start: &HashMap<usize, usize>,
+) -> Option<usize> {
     let mut counts: HashMap<usize, usize> = HashMap::new();
     for (_, t) in cases {
         *counts.entry(*t).or_default() += 1;
@@ -597,7 +692,11 @@ fn negate_cond(e: &Expr) -> Expr {
 }
 
 /// Walk `elems` and record every block index referenced by a residual jump.
-fn collect_residual(elems: &[Elem], by_start: &HashMap<usize, usize>, residual: &mut HashSet<usize>) {
+fn collect_residual(
+    elems: &[Elem],
+    by_start: &HashMap<usize, usize>,
+    residual: &mut HashSet<usize>,
+) {
     for e in elems {
         match e {
             Elem::Goto(t) => {
@@ -688,7 +787,11 @@ pub fn fmt_readable(f: &Function, q: &crate::loader::Qvm) -> String {
     emit_structured(f, q, Some(&ctx))
 }
 
-fn emit_structured(f: &Function, q: &crate::loader::Qvm, ctx: Option<&crate::readable::Ctx>) -> String {
+fn emit_structured(
+    f: &Function,
+    q: &crate::loader::Qvm,
+    ctx: Option<&crate::readable::Ctx>,
+) -> String {
     let em = Emit { f, q, ctx };
     let mut s = Structure::new(f);
     let main = s.structure(0, EXIT);
@@ -729,7 +832,10 @@ fn emit_structured(f: &Function, q: &crate::loader::Qvm, ctx: Option<&crate::rea
     }
 
     let mut out = String::new();
-    out.push_str(&format!("// function @ insn {}..{} frame {}\n", f.start, f.end, f.frame));
+    out.push_str(&format!(
+        "// function @ insn {}..{} frame {}\n",
+        f.start, f.end, f.frame
+    ));
     out.push_str(&em.fn_open());
     fmt_elems(&mut out, &main, &em, 1, &assigned, &s.starts, &mut residual);
     for &bi in &leftover {
@@ -786,7 +892,15 @@ fn fmt_elems(
                 fmt_elems(out, then, em, indent + 1, assigned, starts, residual);
                 if !else_.is_empty() {
                     let mut else_s = String::new();
-                    fmt_elems(&mut else_s, else_, em, indent + 1, assigned, starts, residual);
+                    fmt_elems(
+                        &mut else_s,
+                        else_,
+                        em,
+                        indent + 1,
+                        assigned,
+                        starts,
+                        residual,
+                    );
                     if !else_s.trim().is_empty() {
                         out.push_str(&format!("{pad}}} else {{\n"));
                         out.push_str(&else_s);
@@ -809,14 +923,22 @@ fn fmt_elems(
             Elem::IfGoto { cond, target } => {
                 out.push_str(&format!("{pad}if ({}) goto L{target};\n", em.expr(cond)));
             }
-            Elem::Switch { sel, cases, default } => {
+            Elem::Switch {
+                sel,
+                cases,
+                default,
+            } => {
                 out.push_str(&format!("{pad}switch ({}) {{\n", em.expr(sel)));
                 for (vs, kind) in cases {
                     for v in vs {
                         out.push_str(&format!("{pad}case {v}:\n"));
                     }
                     match kind {
-                        CaseKind::Inline { body, break_, also_default } => {
+                        CaseKind::Inline {
+                            body,
+                            break_,
+                            also_default,
+                        } => {
                             if *also_default {
                                 out.push_str(&format!("{pad}default:\n"));
                             }
@@ -852,7 +974,13 @@ fn fmt_elems(
 }
 
 /// Render a leftover (fallback) block: its body plus its raw terminator.
-fn fmt_block_tail(out: &mut String, em: &Emit, bi: usize, indent: usize, assigned: &HashSet<usize>) {
+fn fmt_block_tail(
+    out: &mut String,
+    em: &Emit,
+    bi: usize,
+    indent: usize,
+    assigned: &HashSet<usize>,
+) {
     let pad = "  ".repeat(indent);
     for st in &em.f.blocks[bi].body {
         fmt_stmt(out, st, em, indent);
@@ -864,7 +992,11 @@ fn fmt_block_tail(out: &mut String, em: &Emit, bi: usize, indent: usize, assigne
         Terminator::IfGoto { cond, target } => {
             out.push_str(&format!("{pad}if ({}) goto L{target};\n", em.expr(cond)));
         }
-                Terminator::Switch { sel, cases, default: _ } => {
+        Terminator::Switch {
+            sel,
+            cases,
+            default: _,
+        } => {
             let mut counts: HashMap<usize, usize> = HashMap::new();
             for (_, t) in cases {
                 *counts.entry(*t).or_default() += 1;
@@ -931,7 +1063,13 @@ fn fmt_stmt(out: &mut String, st: &Stmt, em: &Emit, indent: usize) {
 }
 
 /// Render a return; an unassigned slot is the PUSH dummy of a void return.
-fn fmt_return(out: &mut String, v: &Option<Expr>, em: &Emit, indent: usize, assigned: &HashSet<usize>) {
+fn fmt_return(
+    out: &mut String,
+    v: &Option<Expr>,
+    em: &Emit,
+    indent: usize,
+    assigned: &HashSet<usize>,
+) {
     let pad = "  ".repeat(indent);
     match v {
         Some(Expr::Slot(s)) if !assigned.contains(s) => out.push_str(&format!("{pad}return;\n")),
@@ -941,7 +1079,12 @@ fn fmt_return(out: &mut String, v: &Option<Expr>, em: &Emit, indent: usize, assi
 }
 
 /// Left-hand side of a store: `*addr` in the right width.
-fn store_lhs(q: &crate::loader::Qvm, frame: i32, addr: &Expr, size: crate::decompile::LoadSize) -> String {
+fn store_lhs(
+    q: &crate::loader::Qvm,
+    frame: i32,
+    addr: &Expr,
+    size: crate::decompile::LoadSize,
+) -> String {
     use crate::decompile::LoadSize;
     match addr {
         Expr::AddrLocal(off) => match size {
@@ -959,7 +1102,7 @@ fn stack_name(frame: i32, off: usize) -> String {
     let f = frame as usize;
     if off < f {
         format!("loc_{off}")
-    } else if off >= f + 8 && (off - f - 8) % 4 == 0 {
+    } else if off >= f + 8 && (off - f - 8).is_multiple_of(4) {
         format!("arg_{}", (off - f - 8) / 4)
     } else {
         format!("sp_{off}")
@@ -972,8 +1115,8 @@ fn mem_ref(q: &crate::loader::Qvm, addr: usize, size: crate::decompile::LoadSize
     let ll = q.lit_length as usize;
     if addr < dl {
         match size {
-            LoadSize::I4 if addr % 4 == 0 => format!("data_i32[{}]", addr / 4),
-            LoadSize::I2 if addr % 2 == 0 => format!("data_i16[{}]", addr / 2),
+            LoadSize::I4 if addr.is_multiple_of(4) => format!("data_i32[{}]", addr / 4),
+            LoadSize::I2 if addr.is_multiple_of(2) => format!("data_i16[{}]", addr / 2),
             _ => format!("data_i8[{addr}]"),
         }
     } else if addr < dl + ll {
@@ -1027,7 +1170,14 @@ mod tests {
             size: LoadSize::I4,
         }];
         let f = mk_function(vec![
-            blk(0, vec![], Terminator::IfGoto { cond: lt(const_e(1), const_e(2)), target: 30 }),
+            blk(
+                0,
+                vec![],
+                Terminator::IfGoto {
+                    cond: lt(const_e(1), const_e(2)),
+                    target: 30,
+                },
+            ),
             blk(10, body.clone(), Terminator::Goto(40)),
             blk(30, body.clone(), Terminator::Goto(40)),
             blk(40, vec![], ret(None)),
@@ -1059,7 +1209,14 @@ mod tests {
     fn while_loop() {
         // header b0: if (cond) goto exit(20); body b1: goto 0; b2(20): return
         let f = mk_function(vec![
-            blk(0, vec![], Terminator::IfGoto { cond: lt(const_e(1), const_e(2)), target: 20 }),
+            blk(
+                0,
+                vec![],
+                Terminator::IfGoto {
+                    cond: lt(const_e(1), const_e(2)),
+                    target: 20,
+                },
+            ),
             blk(10, vec![], Terminator::Goto(0)),
             blk(20, vec![], ret(None)),
         ]);
@@ -1101,9 +1258,23 @@ mod tests {
             size: LoadSize::I4,
         }];
         let f = mk_function(vec![
-            blk(0, vec![], Terminator::IfGoto { cond: lt(const_e(1), const_e(2)), target: 30 }),
+            blk(
+                0,
+                vec![],
+                Terminator::IfGoto {
+                    cond: lt(const_e(1), const_e(2)),
+                    target: 30,
+                },
+            ),
             blk(10, s1.clone(), Terminator::Goto(40)),
-            blk(30, vec![], Terminator::IfGoto { cond: lt(const_e(3), const_e(4)), target: 50 }),
+            blk(
+                30,
+                vec![],
+                Terminator::IfGoto {
+                    cond: lt(const_e(3), const_e(4)),
+                    target: 50,
+                },
+            ),
             blk(40, s2.clone(), Terminator::Goto(50)),
             blk(50, vec![], ret(None)),
         ]);
@@ -1135,7 +1306,14 @@ mod tests {
         // b0(0): body, falls to b1; b1(10): if (cond) goto 0; b2(20): return
         let f = mk_function(vec![
             blk(0, vec![], Terminator::Fallthrough),
-            blk(10, vec![], Terminator::IfGoto { cond: lt(const_e(1), const_e(2)), target: 0 }),
+            blk(
+                10,
+                vec![],
+                Terminator::IfGoto {
+                    cond: lt(const_e(1), const_e(2)),
+                    target: 0,
+                },
+            ),
             blk(20, vec![], ret(None)),
         ]);
         let q = crate::loader::Qvm {
@@ -1166,7 +1344,15 @@ mod tests {
     fn switch_cases_inlined() {
         // b0: switch; b1(30): return 1; b2(40): return 2
         let f = mk_function(vec![
-            blk(0, vec![], Terminator::Switch { sel: Box::new(const_e(0)), cases: vec![(0, 30), (1, 40)], default: None }),
+            blk(
+                0,
+                vec![],
+                Terminator::Switch {
+                    sel: Box::new(const_e(0)),
+                    cases: vec![(0, 30), (1, 40)],
+                    default: None,
+                },
+            ),
             blk(30, vec![], ret(Some(1))),
             blk(40, vec![], ret(Some(2))),
         ]);

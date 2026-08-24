@@ -10,7 +10,11 @@ fn main() {
         entries.push(start);
     }
     let data = q.data_int32();
-    println!("data_i32 len = {} (words), blob_len = {} bytes", data.len(), q.data_length + q.lit_length);
+    println!(
+        "data_i32 len = {} (words), blob_len = {} bytes",
+        data.len(),
+        q.data_length + q.lit_length
+    );
     let mut i = 0usize;
     while i < 132 {
         let name = data[771 + i] as usize;

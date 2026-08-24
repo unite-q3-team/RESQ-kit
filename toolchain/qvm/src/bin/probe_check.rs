@@ -88,9 +88,7 @@ fn main() {
         let op0 = ci.op;
         let m = stack_effect(op0);
         os += m;
-        if m >= 0 {
-            ptr[(os / 4) as usize] = Some(i);
-        } else if m > -8 {
+        if m >= 0 || m > -8 {
             ptr[(os / 4) as usize] = Some(i);
         }
 
@@ -103,7 +101,7 @@ fn main() {
                     errs.push(format!("bad entry opstack {} at {i}", pre[i]));
                 }
                 let v = ci.operand.unwrap_or(0);
-                if v < 0 || v >= 0x10000 || v & 3 != 0 {
+                if !(0..0x10000).contains(&v) || v & 3 != 0 {
                     errs.push(format!("bad entry programStack {v} at {i}"));
                 }
                 pstack = v;
@@ -132,7 +130,7 @@ fn main() {
                 if pre[i] != 4 {
                     errs.push(format!("bad opStack {} at {i}", pre[i]));
                 }
-                if v < 0 || v >= 0x10000 || v & 3 != 0 {
+                if !(0..0x10000).contains(&v) || v & 3 != 0 {
                     errs.push(format!("bad return programStack {v} at {i}"));
                 }
                 if op1 == Opcode::Push {
@@ -147,7 +145,9 @@ fn main() {
                     errs.push(format!("bad jump opStack {} at {i}", pre[i]));
                 }
                 if v < startp as i32 || v > endp as i32 {
-                    errs.push(format!("jump target {v} at {i} is out of range ({startp},{endp})"));
+                    errs.push(format!(
+                        "jump target {v} at {i} is out of range ({startp},{endp})"
+                    ));
                 } else if pre[v as usize] != pre[i] - 8 {
                     errs.push(format!(
                         "jump target {v} has bad opStack {}",
@@ -169,10 +169,7 @@ fn main() {
                     } else {
                         let t = v as usize;
                         if pre[t] != pre[i] - 4 {
-                            errs.push(format!(
-                                "jump target {v} has bad opStack {}",
-                                pre[t]
-                            ));
+                            errs.push(format!("jump target {v} has bad opStack {}", pre[t]));
                         }
                         if dis.insns[t].op == Opcode::Enter {
                             errs.push(format!("jump target {v} has bad opcode ENTER"));
@@ -249,9 +246,8 @@ fn main() {
                         let ok = match xop {
                             Opcode::Const => xv >= 0 && xv < data_len,
                             Opcode::Local => {
-                                let fsz = proc
-                                    .map(|p| dis.insns[p].operand.unwrap_or(0))
-                                    .unwrap_or(0);
+                                let fsz =
+                                    proc.map(|p| dis.insns[p].operand.unwrap_or(0)).unwrap_or(0);
                                 xv >= 8 && (proc.is_none() || xv < fsz + 256)
                             }
                             _ => false,
@@ -269,7 +265,10 @@ fn main() {
             Opcode::BlockCopy => {
                 let v = ci.operand.unwrap_or(0);
                 if v >= data_len {
-                    errs.push(format!("bad count {v} for block copy at {}", i.saturating_sub(1)));
+                    errs.push(format!(
+                        "bad count {v} for block copy at {}",
+                        i.saturating_sub(1)
+                    ));
                 }
                 for (label, rel) in [("src", 2usize), ("dst", 1usize)] {
                     let slot = (os / 4 + rel as i32) as usize;
@@ -279,9 +278,7 @@ fn main() {
                         if xop == Opcode::Const && !(xv >= 0 && xv < data_len) {
                             errs.push(format!("bad {label} for block copy at {xi}"));
                         } else if xop == Opcode::Local {
-                            let fsz = proc
-                                .map(|p| dis.insns[p].operand.unwrap_or(0))
-                                .unwrap_or(0);
+                            let fsz = proc.map(|p| dis.insns[p].operand.unwrap_or(0)).unwrap_or(0);
                             if !(xv >= 8 && (proc.is_none() || xv < fsz + 256)) {
                                 errs.push(format!("bad {label} for block copy at {xi}"));
                             }

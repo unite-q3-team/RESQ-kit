@@ -1,15 +1,24 @@
-use qvm::{CaseKind, Elem, Structure, build_cfg, build_functions, decompile_function, disassemble, load};
+use qvm::{
+    build_cfg, build_functions, decompile_function, disassemble, load, CaseKind, Elem, Structure,
+};
 
 fn dump(elems: &[Elem], f: &qvm::Function, q: &qvm::Qvm, indent: usize) {
     let pad = "  ".repeat(indent);
     for e in elems {
         match e {
             Elem::Block { idx: b, body } => {
-                let blk = &f.blocks[*b]; let _ = body;
-                println!("{pad}Block L{} term={:?} body={:?}", blk.start, blk.term, blk.body);
+                let blk = &f.blocks[*b];
+                let _ = body;
+                println!(
+                    "{pad}Block L{} term={:?} body={:?}",
+                    blk.start, blk.term, blk.body
+                );
             }
             Elem::If { cond, then, else_ } => {
-                println!("{pad}If cond={}", qvm::decompile::fmt_expr(q, f.frame, cond));
+                println!(
+                    "{pad}If cond={}",
+                    qvm::decompile::fmt_expr(q, f.frame, cond)
+                );
                 dump(then, f, q, indent + 1);
                 if !else_.is_empty() {
                     println!("{pad}Else:");
@@ -17,15 +26,28 @@ fn dump(elems: &[Elem], f: &qvm::Function, q: &qvm::Qvm, indent: usize) {
                 }
             }
             Elem::While { cond, body } => {
-                println!("{pad}While cond={}", qvm::decompile::fmt_expr(q, f.frame, cond));
+                println!(
+                    "{pad}While cond={}",
+                    qvm::decompile::fmt_expr(q, f.frame, cond)
+                );
                 dump(body, f, q, indent + 1);
             }
             Elem::DoWhile { cond, body } => {
-                println!("{pad}DoWhile cond={}", qvm::decompile::fmt_expr(q, f.frame, cond));
+                println!(
+                    "{pad}DoWhile cond={}",
+                    qvm::decompile::fmt_expr(q, f.frame, cond)
+                );
                 dump(body, f, q, indent + 1);
             }
-            Elem::Switch { sel, cases, default } => {
-                println!("{pad}Switch sel={}", qvm::decompile::fmt_expr(q, f.frame, sel));
+            Elem::Switch {
+                sel,
+                cases,
+                default,
+            } => {
+                println!(
+                    "{pad}Switch sel={}",
+                    qvm::decompile::fmt_expr(q, f.frame, sel)
+                );
                 for (vals, kind) in cases {
                     match kind {
                         CaseKind::Goto(t) => println!("{pad}  case {:?}: Goto L{}", vals, t),
@@ -45,7 +67,11 @@ fn dump(elems: &[Elem], f: &qvm::Function, q: &qvm::Qvm, indent: usize) {
                 }
             }
             Elem::IfGoto { cond, target } => {
-                println!("{pad}IfGoto cond={} target=L{}", qvm::decompile::fmt_expr(q, f.frame, cond), target);
+                println!(
+                    "{pad}IfGoto cond={} target=L{}",
+                    qvm::decompile::fmt_expr(q, f.frame, cond),
+                    target
+                );
             }
             Elem::Goto(t) => println!("{pad}Goto L{}", t),
             Elem::Return(..) => println!("{pad}Return"),
@@ -56,7 +82,11 @@ fn dump(elems: &[Elem], f: &qvm::Function, q: &qvm::Qvm, indent: usize) {
 
 fn main() {
     let path = std::env::args().nth(1).unwrap();
-    let fnidx: usize = std::env::args().nth(2).unwrap_or("0".into()).parse().unwrap();
+    let fnidx: usize = std::env::args()
+        .nth(2)
+        .unwrap_or("0".into())
+        .parse()
+        .unwrap();
     let q = load(&path).expect("load qvm");
     let d = disassemble(&q).expect("disasm");
     let ranges = build_functions(&d);
@@ -70,6 +100,9 @@ fn main() {
     let leftover = s.leftover();
     println!("leftover: {:?}", leftover);
     for &bi in &leftover {
-        println!("  L{} term={:?} body={:?}", f.blocks[bi].start, f.blocks[bi].term, f.blocks[bi].body);
+        println!(
+            "  L{} term={:?} body={:?}",
+            f.blocks[bi].start, f.blocks[bi].term, f.blocks[bi].body
+        );
     }
 }

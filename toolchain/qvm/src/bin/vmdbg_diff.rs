@@ -53,7 +53,9 @@ fn drive(addr: &str, outfile: &str, ms: u64, mode: &str) -> std::io::Result<()> 
 
 // Read from the socket until a line "END" is seen (or the peer closes).
 fn read_until_end(stream: &mut TcpStream) -> std::io::Result<Vec<String>> {
-    stream.set_read_timeout(Some(Duration::from_millis(4000))).ok();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(4000)))
+        .ok();
     let mut out = Vec::new();
     let mut buf = [0u8; 1];
     let mut line = String::new();
@@ -84,6 +86,8 @@ struct Sys {
     num: i32,
     args: [i32; 6],
     // most recent ENTER pc/name before this syscall (best-effort, not popped on return)
+    // pc is parsed for format fidelity but unused by the diff itself
+    #[allow(dead_code)]
     ctx_pc: i32,
     ctx_name: String,
 }
@@ -129,7 +133,11 @@ fn diff(orig: &str, rbld: &str, only: &Option<Vec<i32>>) -> std::io::Result<()> 
     if let Some(set) = only {
         println!("[diff] filtering to syscalls {set:?}");
     }
-    println!("[diff] {} syscalls (orig)  vs  {} syscalls (rbld)", a.len(), b.len());
+    println!(
+        "[diff] {} syscalls (orig)  vs  {} syscalls (rbld)",
+        a.len(),
+        b.len()
+    );
 
     // Compare the syscall NUMBER stream only. Argument values that are VM
     // pointers legitimately differ between two compilations (different data
@@ -166,7 +174,11 @@ fn diff(orig: &str, rbld: &str, only: &Option<Vec<i32>>) -> std::io::Result<()> 
             a.len(),
             b.len()
         );
-        let (longer, label) = if a.len() > b.len() { (&a, "orig") } else { (&b, "rbld") };
+        let (longer, label) = if a.len() > b.len() {
+            (&a, "orig")
+        } else {
+            (&b, "rbld")
+        };
         if n < longer.len() {
             let s = &longer[n];
             println!(
@@ -233,7 +245,9 @@ fn main() {
         }
         "diff" if args.len() >= 4 => {
             let only = args.get(4).and_then(|s| s.strip_prefix("only=")).map(|s| {
-                s.split(',').filter_map(|x| x.parse::<i32>().ok()).collect::<Vec<_>>()
+                s.split(',')
+                    .filter_map(|x| x.parse::<i32>().ok())
+                    .collect::<Vec<_>>()
             });
             diff(&args[2], &args[3], &only)
         }

@@ -4,18 +4,27 @@
 //! Usage: probe_callers <qvm> [--named] [--min N] [--only N,M,...]
 //!   default: unnamed functions only
 
-use qvm::{build_functions, disassemble, load};
 use qvm::opcodes::Opcode;
+use qvm::{build_functions, disassemble, load};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let path = &args[0];
     let named = args.iter().any(|a| a == "--named");
-    let min = args.iter().position(|a| a == "--min")
-        .and_then(|i| args.get(i + 1)).map(|s| s.parse::<usize>().unwrap()).unwrap_or(0);
-    let only: Option<Vec<usize>> = args.iter().position(|a| a == "--only")
-        .and_then(|i| args.get(i + 1)).map(|s| {
-            s.split(',').map(|t| t.trim().parse::<usize>().unwrap()).collect()
+    let min = args
+        .iter()
+        .position(|a| a == "--min")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.parse::<usize>().unwrap())
+        .unwrap_or(0);
+    let only: Option<Vec<usize>> = args
+        .iter()
+        .position(|a| a == "--only")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| {
+            s.split(',')
+                .map(|t| t.trim().parse::<usize>().unwrap())
+                .collect()
         });
 
     let mut q = load(path).expect("load qvm");
@@ -28,7 +37,9 @@ fn main() {
                 let mut it = line.split_whitespace();
                 if let (Some(f), Some(n)) = (it.next(), it.next()) {
                     if let Some(rest) = f.strip_prefix("fn[") {
-                        if let Some(idx) = rest.strip_suffix(']').and_then(|x| x.parse::<usize>().ok()) {
+                        if let Some(idx) =
+                            rest.strip_suffix(']').and_then(|x| x.parse::<usize>().ok())
+                        {
                             if let Some(&(s, _e)) = ranges.get(idx) {
                                 q.names.insert(s, n.to_string());
                             }
@@ -94,15 +105,27 @@ fn main() {
         let is_named = name.is_some();
         if named == is_named || (named && is_named) || (!named && !is_named) {
             let keep = is_named == named;
-            if only.is_some() {
-                if !only.as_ref().unwrap().contains(&fi) { continue; }
-            } else if !keep { continue; }
-            if (end - start) < min { continue; }
-            let cs: Vec<String> = callers[fi].iter()
+            match &only {
+                Some(set) => {
+                    if !set.contains(&fi) {
+                        continue;
+                    }
+                }
+                None => {
+                    if !keep {
+                        continue;
+                    }
+                }
+            }
+            if (end - start) < min {
+                continue;
+            }
+            let cs: Vec<String> = callers[fi]
+                .iter()
                 .map(|c| {
                     let (s2, _e2) = ranges[*c];
                     match names.get(&s2) {
-                        Some(n) => format!("{n}"),
+                        Some(n) => n.to_string(),
                         None => format!("fn[{c}]"),
                     }
                 })
@@ -114,8 +137,16 @@ fn main() {
                 "fn[{fi}] insns {start}..{end} ({}): callers=[{}]{} {}",
                 end - start,
                 cs.join(", "),
-                if st.is_empty() { String::new() } else { format!(" S:{st}") },
-                if tr.is_empty() { String::new() } else { format!(" T:{tr}") }
+                if st.is_empty() {
+                    String::new()
+                } else {
+                    format!(" S:{st}")
+                },
+                if tr.is_empty() {
+                    String::new()
+                } else {
+                    format!(" T:{tr}")
+                }
             );
         }
     }

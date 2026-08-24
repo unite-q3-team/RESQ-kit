@@ -2,7 +2,10 @@ use qvm::{disassemble, load};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    if a.is_empty() { eprintln!("usage: probe_insns <qvm>"); std::process::exit(2); }
+    if a.is_empty() {
+        eprintln!("usage: probe_insns <qvm>");
+        std::process::exit(2);
+    }
     let q = load(&a[0]).expect("load");
     let _d = disassemble(&q).expect("disasm");
     let data = q.data_int32();

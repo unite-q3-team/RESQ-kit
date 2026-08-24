@@ -4,11 +4,13 @@
 //! Usage: probe_verify <path.qvm> <fn_index> [arg0] [arg1] ...
 //! E.g. probe_verify vm/game/game.qvm 10 0   (G_ShutdownGame restart=0)
 
-use qvm::{Emu, build_functions, disassemble, load, trap_name};
+use qvm::{build_functions, disassemble, load, trap_name, Emu};
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().expect("usage: probe_verify <qvm> <fn> [args...]");
+    let path = args
+        .next()
+        .expect("usage: probe_verify <qvm> <fn> [args...]");
     let fnidx: usize = args.next().expect("fn index").parse().unwrap();
     let call_args: Vec<i32> = args.map(|a| a.parse().unwrap()).collect();
 
@@ -44,7 +46,10 @@ fn main() {
         Ok(v) => println!("result: {v} (0x{v:X})"),
         Err(e) => println!("error: {e}"),
     }
-    println!("stats: steps={} syscalls={}", emu.stats.steps, emu.stats.syscalls);
+    println!(
+        "stats: steps={} syscalls={}",
+        emu.stats.steps, emu.stats.syscalls
+    );
 }
 
 fn q_string(mem: &qvm::Memory, addr: i32) -> Option<String> {
@@ -52,7 +57,11 @@ fn q_string(mem: &qvm::Memory, addr: i32) -> Option<String> {
     let rest = mem.data.get(a..)?;
     let end = rest.iter().position(|&b| b == 0)?;
     let s = &rest[..end];
-    if s.is_empty() || !s.iter().all(|&b| b == b'\n' || b == b'\r' || b == b'\t' || (b >= 0x20 && b < 0x7f)) {
+    if s.is_empty()
+        || !s
+            .iter()
+            .all(|&b| b == b'\n' || b == b'\r' || b == b'\t' || (0x20..0x7f).contains(&b))
+    {
         return None;
     }
     Some(String::from_utf8_lossy(s).into_owned())

@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use qvm::{Opcode, build_functions, disassemble, load, trap_name};
+use qvm::{build_functions, disassemble, load, trap_name, Opcode};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

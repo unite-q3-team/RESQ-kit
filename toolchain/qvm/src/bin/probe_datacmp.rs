@@ -40,9 +40,7 @@ fn main() {
         diffs
     );
     for (i, x, y) in &first {
-        println!(
-            "  diff at 0x{i:06X} (orig mem): orig=0x{x:02X} rebuilt=0x{y:02X}"
-        );
+        println!("  diff at 0x{i:06X} (orig mem): orig=0x{x:02X} rebuilt=0x{y:02X}");
     }
     if diffs == 0 {
         println!("MATCH: rebuilt data segment reproduces orig data+lit at all offsets");
@@ -62,9 +60,7 @@ fn main() {
         }
         println!("word diffs = {word_diffs}");
         for (i, x, y) in &w_first {
-            println!(
-                "  word diff at 0x{i:06X}: orig=0x{x:08X} rebuilt=0x{y:08X}"
-            );
+            println!("  word diff at 0x{i:06X}: orig=0x{x:08X} rebuilt=0x{y:08X}");
         }
         exit(1);
     }

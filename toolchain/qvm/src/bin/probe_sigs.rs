@@ -23,23 +23,47 @@ fn is_float_op(op: Opcode) -> bool {
 }
 
 fn is_float_cmp(op: Opcode) -> bool {
-    matches!(op, Opcode::Eqf | Opcode::Nef | Opcode::Ltf | Opcode::Lef | Opcode::Gtf | Opcode::Gef)
+    matches!(
+        op,
+        Opcode::Eqf | Opcode::Nef | Opcode::Ltf | Opcode::Lef | Opcode::Gtf | Opcode::Gef
+    )
 }
 
 fn is_int_binop(op: Opcode) -> bool {
     matches!(
         op,
-        Opcode::Negi | Opcode::Add | Opcode::Sub | Opcode::Divi | Opcode::Divu | Opcode::Modi
-            | Opcode::Modu | Opcode::Muli | Opcode::Mulu | Opcode::Band | Opcode::Bor
-            | Opcode::Bxor | Opcode::Bcom | Opcode::Lsh | Opcode::Rshi | Opcode::Rshu
+        Opcode::Negi
+            | Opcode::Add
+            | Opcode::Sub
+            | Opcode::Divi
+            | Opcode::Divu
+            | Opcode::Modi
+            | Opcode::Modu
+            | Opcode::Muli
+            | Opcode::Mulu
+            | Opcode::Band
+            | Opcode::Bor
+            | Opcode::Bxor
+            | Opcode::Bcom
+            | Opcode::Lsh
+            | Opcode::Rshi
+            | Opcode::Rshu
     )
 }
 
 fn is_int_cmp(op: Opcode) -> bool {
     matches!(
         op,
-        Opcode::Eq | Opcode::Ne | Opcode::Lti | Opcode::Lei | Opcode::Gti | Opcode::Gei
-            | Opcode::Ltu | Opcode::Leu | Opcode::Gtu | Opcode::Geu
+        Opcode::Eq
+            | Opcode::Ne
+            | Opcode::Lti
+            | Opcode::Lei
+            | Opcode::Gti
+            | Opcode::Gei
+            | Opcode::Ltu
+            | Opcode::Leu
+            | Opcode::Gtu
+            | Opcode::Geu
     )
 }
 
@@ -149,7 +173,7 @@ impl ArgEv {
 
 fn arg_index(frame: i32, off: usize) -> Option<usize> {
     let f = frame as usize;
-    if off >= f + 8 && (off - f - 8) % 4 == 0 {
+    if off >= f + 8 && (off - f - 8).is_multiple_of(4) {
         Some((off - f - 8) / 4)
     } else {
         None
@@ -165,7 +189,9 @@ fn main() {
         .map(|s| s.to_string());
     let only: Option<HashSet<usize>> = args.iter().position(|a| a == "--only").and_then(|i| {
         args.get(i + 1).map(|s| {
-            s.split(',').map(|t| t.trim().parse::<usize>().unwrap()).collect()
+            s.split(',')
+                .map(|t| t.trim().parse::<usize>().unwrap())
+                .collect()
         })
     });
 
@@ -179,7 +205,9 @@ fn main() {
                 let mut it = line.split_whitespace();
                 if let (Some(f), Some(n)) = (it.next(), it.next()) {
                     if let Some(rest) = f.strip_prefix("fn[") {
-                        if let Some(idx) = rest.strip_suffix(']').and_then(|x| x.parse::<usize>().ok()) {
+                        if let Some(idx) =
+                            rest.strip_suffix(']').and_then(|x| x.parse::<usize>().ok())
+                        {
                             if let Some(&(s, _e)) = ranges.get(idx) {
                                 q.names.insert(s, n.to_string());
                             }
@@ -238,21 +266,28 @@ fn main() {
                                 let mut val_pending = 0usize;
                                 while j < end && j < i + 6 {
                                     let oj = d.insns[j].op;
-                                    if matches!(oj, Opcode::Store1 | Opcode::Store2 | Opcode::Store4)
-                                        && val_pending >= 1
+                                    if matches!(
+                                        oj,
+                                        Opcode::Store1 | Opcode::Store2 | Opcode::Store4
+                                    ) && val_pending >= 1
                                     {
                                         ev.ptr += 1;
                                         break;
                                     }
                                     match oj {
-                                        Opcode::Const | Opcode::Local | Opcode::Push | Opcode::Call
-                                        | Opcode::Load1 | Opcode::Load2 | Opcode::Load4 => {
-                                            val_pending += 1
-                                        }
+                                        Opcode::Const
+                                        | Opcode::Local
+                                        | Opcode::Push
+                                        | Opcode::Call
+                                        | Opcode::Load1
+                                        | Opcode::Load2
+                                        | Opcode::Load4 => val_pending += 1,
                                         Opcode::Pop | Opcode::Arg | Opcode::Jump => {
                                             val_pending = val_pending.saturating_sub(1)
                                         }
-                                        Opcode::Store1 | Opcode::Store2 | Opcode::Store4
+                                        Opcode::Store1
+                                        | Opcode::Store2
+                                        | Opcode::Store4
                                         | Opcode::BlockCopy => {
                                             val_pending = val_pending.saturating_sub(2)
                                         }
@@ -311,11 +346,12 @@ fn main() {
 
     // ---- returns: void vs value + float hint ----
     let data = q.data_int32();
-    let mut lines: Vec<String> = Vec::new();
-    lines.push("# probe_sigs: signatures derived from bytecode (stage C2)".into());
-    lines.push("# format: fn[N] <name> frame=<enter> args=<arity> ret=<void|int|float>".into());
-    lines.push("# arg types are best-guess from callee usage (ptr/float/int/unknown)".into());
-    lines.push("# ' float?' = caller/return path uses the value in a float context".into());
+    let mut lines: Vec<String> = vec![
+        "# probe_sigs: signatures derived from bytecode (stage C2)".into(),
+        "# format: fn[N] <name> frame=<enter> args=<arity> ret=<void|int|float>".into(),
+        "# arg types are best-guess from callee usage (ptr/float/int/unknown)".into(),
+        "# ' float?' = caller/return path uses the value in a float context".into(),
+    ];
 
     for (fi, &(start, end)) in ranges.iter().enumerate() {
         if only.as_ref().is_some_and(|s| !s.contains(&fi)) {
@@ -352,15 +388,13 @@ fn main() {
                                         slot_float.insert(*slot);
                                     }
                                 }
-                                qvm::Stmt::Store { addr, value, .. } => {
-                                    if let qvm::Expr::AddrLocal(off) = addr {
-                                        if float_or(
-                                            slot_float.contains(off),
-                                            &local_float,
-                                            value,
-                                        ) {
-                                            local_float.insert(*off);
-                                        }
+                                qvm::Stmt::Store {
+                                    addr: qvm::Expr::AddrLocal(off),
+                                    value,
+                                    ..
+                                } => {
+                                    if float_or(slot_float.contains(off), &local_float, value) {
+                                        local_float.insert(*off);
                                     }
                                 }
                                 _ => {}
@@ -420,19 +454,29 @@ fn main() {
             None => "unknown".to_string(),
         };
 
-        let name = q.name_for_fn(start).unwrap_or(&format!("fn_{start}")).to_string();
+        let name = q
+            .name_for_fn(start)
+            .unwrap_or(&format!("fn_{start}"))
+            .to_string();
         let maxk = callee_max_k_all[fi];
         let arity = maxk.map_or(0, |m| m + 1).max(caller_max_args[fi]);
         let (used, caller_float) = caller_ret_use[fi];
         let fmark = ret == "float" || (used && caller_float);
         lines.push(format!(
             "fn[{fi}] {name} frame={frame} args={arity} ret={ret}{}",
-            if fmark && ret != "float" { " float?" } else { "" }
+            if fmark && ret != "float" {
+                " float?"
+            } else {
+                ""
+            }
         ));
         if let Some(mk) = maxk {
             let mut argline = Vec::new();
             for k in 0..=mk {
-                let t = arg_ev_all[fi].get(&k).map(|e| e.guess()).unwrap_or("unknown");
+                let t = arg_ev_all[fi]
+                    .get(&k)
+                    .map(|e| e.guess())
+                    .unwrap_or("unknown");
                 argline.push(format!("arg{k}={t}"));
             }
             lines.push(format!("    {}", argline.join(" ")));
@@ -441,7 +485,7 @@ fn main() {
 
     match out_path {
         Some(p) => std::fs::write(&p, lines.join("\n") + "\n").expect("write sigs"),
-        None => print!("{}\n", lines.join("\n")),
+        None => println!("{}", lines.join("\n")),
     }
 }
 
@@ -459,7 +503,7 @@ fn is_float_expr(e: &qvm::Expr) -> bool {
 /// Float-ness of a value, extended by slot/local inference sets.
 fn float_or(slotf: bool, localf: &HashSet<usize>, e: &qvm::Expr) -> bool {
     match e {
-        qvm::Expr::Slot(s) => slotf || is_float_expr(e),
+        qvm::Expr::Slot(_s) => slotf || is_float_expr(e),
         qvm::Expr::Local { off, .. } => localf.contains(off) || is_float_expr(e),
         // Float-ness comes from Float() markers (float ops as_float operands),
         // not from recursing into operands/addresses and checking inferred

@@ -4,9 +4,9 @@
 //!
 //! - Default: 1 byte (opcode only).
 //! - opcode + 4-byte little-endian int32:
-//!     OP_ENTER, OP_LEAVE, OP_CONST, OP_LOCAL, OP_BLOCK_COPY,
-//!     and ALL comparison ops (OP_EQ..OP_GEF). The comparison operand is an
-//!     INSTRUCTION INDEX, resolved via instructionPointers at load time.
+//!   OP_ENTER, OP_LEAVE, OP_CONST, OP_LOCAL, OP_BLOCK_COPY,
+//!   and ALL comparison ops (OP_EQ..OP_GEF). The comparison operand is an
+//!   INSTRUCTION INDEX, resolved via instructionPointers at load time.
 //! - opcode + 1 byte: OP_ARG (offset from programStack).
 
 /// QVM opcodes (enum opcode_t from ioq3 vm_local.h; numeric values are the
@@ -212,9 +212,27 @@ impl Opcode {
         use Opcode::*;
         matches!(
             self,
-            Enter | Leave | Const | Local | BlockCopy
-                | Eq | Ne | Lti | Lei | Gti | Gei
-                | Ltu | Leu | Gtu | Geu | Eqf | Nef | Ltf | Lef | Gtf | Gef
+            Enter
+                | Leave
+                | Const
+                | Local
+                | BlockCopy
+                | Eq
+                | Ne
+                | Lti
+                | Lei
+                | Gti
+                | Gei
+                | Ltu
+                | Leu
+                | Gtu
+                | Geu
+                | Eqf
+                | Nef
+                | Ltf
+                | Lef
+                | Gtf
+                | Gef
         )
     }
 
@@ -223,7 +241,21 @@ impl Opcode {
         use Opcode::*;
         matches!(
             self,
-            Eq | Ne | Lti | Lei | Gti | Gei | Ltu | Leu | Gtu | Geu | Eqf | Nef | Ltf | Lef | Gtf | Gef
+            Eq | Ne
+                | Lti
+                | Lei
+                | Gti
+                | Gei
+                | Ltu
+                | Leu
+                | Gtu
+                | Geu
+                | Eqf
+                | Nef
+                | Ltf
+                | Lef
+                | Gtf
+                | Gef
         )
     }
 

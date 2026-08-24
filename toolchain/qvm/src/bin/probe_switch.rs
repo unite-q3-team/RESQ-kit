@@ -27,18 +27,29 @@ fn main() {
             total_switches += n;
         }
         for b in &f.blocks {
-            if let Terminator::Switch { sel, cases, default } = &b.term {
+            if let Terminator::Switch {
+                sel,
+                cases,
+                default,
+            } = &b.term
+            {
                 max_cases = max_cases.max(cases.len());
                 for (_, t) in cases {
                     if *t < cfg.start || *t >= cfg.end {
                         bad += 1;
-                        println!("BAD fn[{fi}] block@{} case target {t} outside [{}, {})", b.start, cfg.start, cfg.end);
+                        println!(
+                            "BAD fn[{fi}] block@{} case target {t} outside [{}, {})",
+                            b.start, cfg.start, cfg.end
+                        );
                     }
                 }
                 if let Some(dflt) = default {
                     if *dflt < cfg.start || *dflt >= cfg.end {
                         bad += 1;
-                        println!("BAD fn[{fi}] block@{} default target {dflt} outside [{}, {})", b.start, cfg.start, cfg.end);
+                        println!(
+                            "BAD fn[{fi}] block@{} default target {dflt} outside [{}, {})",
+                            b.start, cfg.start, cfg.end
+                        );
                     }
                 }
                 let _ = sel;

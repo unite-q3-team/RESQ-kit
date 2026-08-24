@@ -15,8 +15,8 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use crate::{Memory, SyscallHandler, trap_name};
 use crate::traps::Module;
+use crate::{trap_name, Memory, SyscallHandler};
 
 /// Real argument count for traps (so stale stack slots beyond the actual ARG
 /// pushes are ignored in the comparison). Unlisted traps keep the default 8
@@ -29,96 +29,96 @@ pub fn arity_of(m: Module, n: u32) -> Option<usize> {
             // Q3 1.32-era ui_syscalls numbering (ui_syscalls.asm). NOTE: the
             // ui numbering differs from BOTH game and cgame (Cvar_Register is
             // 50 here, not 3; Cvar_Set is 3).
-            0 => 1,       // Error(msg)
-            1 => 1,       // Print(msg)
-            2 => 0,       // Milliseconds
-            3 => 2,       // Cvar_Set(name, value)
-            4 => 1,       // Cvar_VariableValue(name)
-            5 => 3,       // Cvar_VariableStringBuffer(name, buf, size)
-            6 => 2,       // Cvar_SetValue(name, value)
-            7 => 1,       // Cvar_Reset(name)
-            8 => 3,       // Cvar_Create(name, value, flags)
-            9 => 3,       // Cvar_InfoStringBuffer
-            10 => 0,      // Argc
-            11 => 3,      // Argv(arg, buf, size)
-            12 => 2,      // Cmd_ExecuteText(exec_when, text)
-            13 => 3,      // FS_FOpenFile(qpath, *f, mode)
-            14 => 3,      // FS_Read(buf, len, f)
-            15 => 3,      // FS_Write(buf, len, f)
-            16 => 1,      // FS_FCloseFile(f)
-            17 => 4,      // FS_GetFileList(path, ext, *list, listSize)
-            18 => 1,      // R_RegisterModel(name)
-            19 => 1,      // R_RegisterSkin(name)
-            20 => 1,      // R_RegisterShaderNoMip(name)
-            21 => 0,      // R_ClearScene
-            22 => 1,      // R_AddRefEntityToScene(&re)
-            23 => 3,      // R_AddPolyToScene(shader, numVerts, verts)
-            24 => 6,      // R_AddLightToScene(origin, radius, intensity, r, g, b)
-            25 => 1,      // R_RenderScene(&refdef)
-            26 => 1,      // R_SetColor(vec4)
-            27 => 9,      // R_DrawStretchPic(x, y, w, h, s1, t1, s2, t2, shader)
-            28 => 0,      // UpdateScreen
-            29 => 4,      // CM_LerpTag(tag, refent, tagName, startIndex)
-            30 => 1,      // CM_LoadModel(name)
-            31 => 2,      // S_RegisterSound(name, compressed)
-            32 => 3,      // S_StartLocalSound(sound, channel, volume)
-            33 => 3,      // Key_KeynumToStringBuf
-            34 => 3,      // Key_GetBindingBuf
-            35 => 3,      // Key_SetBinding
-            36 => 1,      // Key_IsDown
-            37 => 1,      // Key_GetOverstrikeMode
-            38 => 1,      // Key_SetOverstrikeMode
-            39 => 0,      // Key_ClearStates
-            40 => 0,      // Key_GetCatcher
-            41 => 1,      // Key_SetCatcher
-            42 => 2,      // GetClipboardData
-            43 => 1,      // GetGlconfig(&glconfig)
-            44 => 1,      // GetClientState(&cl)
-            45 => 3,      // GetConfigString(index, buf, size)
-            46 => 0,      // LAN_GetPingQueueCount
-            47 => 1,      // LAN_ClearPing(n)
-            48 => 3,      // LAN_GetPing
-            49 => 3,      // LAN_GetPingInfo
-            50 => 4,      // Cvar_Register(&var, name, defaultValue, flags)
-            51 => 1,      // Cvar_Update(&var)
-            52 => 0,      // MemoryRemaining
-            53 => 2,      // GetCDKey(buf, len)
-            54 => 2,      // SetCDKey(buf, len)
-            55 => 3,      // R_RegisterFont(name, pointSize, &font)
-            56 => 2,      // R_ModelBounds(model, mins, maxs)
-            57 => 1,      // PC_AddGlobalDefine
-            58 => 1,      // PC_LoadSource
-            59 => 1,      // PC_FreeSource
-            60 => 2,      // PC_ReadToken
-            61 => 2,      // PC_SourceFileAndLine
-            62 => 0,      // S_StopBackgroundTrack
-            63 => 2,      // S_StartBackgroundTrack
-            64 => 1,      // RealTime(&qtime)
-            65 => 1,      // LAN_GetServerCount
-            66 => 2,      // LAN_GetServerAddressString
-            67 => 3,      // LAN_GetServerInfo
-            68 => 2,      // LAN_MarkServerVisible
-            69 => 1,      // LAN_UpdateVisiblePings
-            70 => 0,      // LAN_ResetPings
-            71 => 0,      // LAN_LoadCachedServers
-            72 => 0,      // LAN_SaveCachedServers
-            73 => 3,      // LAN_AddServer
-            74 => 2,      // LAN_RemoveServer
-            75 => 6,      // CIN_PlayCinematic(filename, x, y, w, h, systemBits)
-            76 => 1,      // CIN_StopCinematic(handle)
-            77 => 1,      // CIN_RunCinematic(handle)
-            78 => 1,      // CIN_DrawCinematic(handle)
-            79 => 5,      // CIN_SetExtents(handle, x, y, w, h)
-            80 => 3,      // R_RemapShader
-            81 => 2,      // VerifyCDKey
-            82 => 3,      // LAN_ServerStatus
-            83 => 2,      // LAN_GetServerPing
-            84 => 1,      // LAN_ServerIsVisible
-            85 => 2,      // LAN_CompareServers
-            86 => 3,      // FS_Seek
-            87 => 1,      // SetPbClStatus
-            100 | 101 | 102 => 3, // memset/memcpy/strncpy
-            103..=108 => 1,       // float math helpers
+            0 => 1,         // Error(msg)
+            1 => 1,         // Print(msg)
+            2 => 0,         // Milliseconds
+            3 => 2,         // Cvar_Set(name, value)
+            4 => 1,         // Cvar_VariableValue(name)
+            5 => 3,         // Cvar_VariableStringBuffer(name, buf, size)
+            6 => 2,         // Cvar_SetValue(name, value)
+            7 => 1,         // Cvar_Reset(name)
+            8 => 3,         // Cvar_Create(name, value, flags)
+            9 => 3,         // Cvar_InfoStringBuffer
+            10 => 0,        // Argc
+            11 => 3,        // Argv(arg, buf, size)
+            12 => 2,        // Cmd_ExecuteText(exec_when, text)
+            13 => 3,        // FS_FOpenFile(qpath, *f, mode)
+            14 => 3,        // FS_Read(buf, len, f)
+            15 => 3,        // FS_Write(buf, len, f)
+            16 => 1,        // FS_FCloseFile(f)
+            17 => 4,        // FS_GetFileList(path, ext, *list, listSize)
+            18 => 1,        // R_RegisterModel(name)
+            19 => 1,        // R_RegisterSkin(name)
+            20 => 1,        // R_RegisterShaderNoMip(name)
+            21 => 0,        // R_ClearScene
+            22 => 1,        // R_AddRefEntityToScene(&re)
+            23 => 3,        // R_AddPolyToScene(shader, numVerts, verts)
+            24 => 6,        // R_AddLightToScene(origin, radius, intensity, r, g, b)
+            25 => 1,        // R_RenderScene(&refdef)
+            26 => 1,        // R_SetColor(vec4)
+            27 => 9,        // R_DrawStretchPic(x, y, w, h, s1, t1, s2, t2, shader)
+            28 => 0,        // UpdateScreen
+            29 => 4,        // CM_LerpTag(tag, refent, tagName, startIndex)
+            30 => 1,        // CM_LoadModel(name)
+            31 => 2,        // S_RegisterSound(name, compressed)
+            32 => 3,        // S_StartLocalSound(sound, channel, volume)
+            33 => 3,        // Key_KeynumToStringBuf
+            34 => 3,        // Key_GetBindingBuf
+            35 => 3,        // Key_SetBinding
+            36 => 1,        // Key_IsDown
+            37 => 1,        // Key_GetOverstrikeMode
+            38 => 1,        // Key_SetOverstrikeMode
+            39 => 0,        // Key_ClearStates
+            40 => 0,        // Key_GetCatcher
+            41 => 1,        // Key_SetCatcher
+            42 => 2,        // GetClipboardData
+            43 => 1,        // GetGlconfig(&glconfig)
+            44 => 1,        // GetClientState(&cl)
+            45 => 3,        // GetConfigString(index, buf, size)
+            46 => 0,        // LAN_GetPingQueueCount
+            47 => 1,        // LAN_ClearPing(n)
+            48 => 3,        // LAN_GetPing
+            49 => 3,        // LAN_GetPingInfo
+            50 => 4,        // Cvar_Register(&var, name, defaultValue, flags)
+            51 => 1,        // Cvar_Update(&var)
+            52 => 0,        // MemoryRemaining
+            53 => 2,        // GetCDKey(buf, len)
+            54 => 2,        // SetCDKey(buf, len)
+            55 => 3,        // R_RegisterFont(name, pointSize, &font)
+            56 => 2,        // R_ModelBounds(model, mins, maxs)
+            57 => 1,        // PC_AddGlobalDefine
+            58 => 1,        // PC_LoadSource
+            59 => 1,        // PC_FreeSource
+            60 => 2,        // PC_ReadToken
+            61 => 2,        // PC_SourceFileAndLine
+            62 => 0,        // S_StopBackgroundTrack
+            63 => 2,        // S_StartBackgroundTrack
+            64 => 1,        // RealTime(&qtime)
+            65 => 1,        // LAN_GetServerCount
+            66 => 2,        // LAN_GetServerAddressString
+            67 => 3,        // LAN_GetServerInfo
+            68 => 2,        // LAN_MarkServerVisible
+            69 => 1,        // LAN_UpdateVisiblePings
+            70 => 0,        // LAN_ResetPings
+            71 => 0,        // LAN_LoadCachedServers
+            72 => 0,        // LAN_SaveCachedServers
+            73 => 3,        // LAN_AddServer
+            74 => 2,        // LAN_RemoveServer
+            75 => 6,        // CIN_PlayCinematic(filename, x, y, w, h, systemBits)
+            76 => 1,        // CIN_StopCinematic(handle)
+            77 => 1,        // CIN_RunCinematic(handle)
+            78 => 1,        // CIN_DrawCinematic(handle)
+            79 => 5,        // CIN_SetExtents(handle, x, y, w, h)
+            80 => 3,        // R_RemapShader
+            81 => 2,        // VerifyCDKey
+            82 => 3,        // LAN_ServerStatus
+            83 => 2,        // LAN_GetServerPing
+            84 => 1,        // LAN_ServerIsVisible
+            85 => 2,        // LAN_CompareServers
+            86 => 3,        // FS_Seek
+            87 => 1,        // SetPbClStatus
+            100..=102 => 3, // memset/memcpy/strncpy
+            103..=108 => 1, // float math helpers
             _ => return None,
         });
     }
@@ -130,8 +130,9 @@ pub fn arity_of(m: Module, n: u32) -> Option<usize> {
             // mismatches (e.g. the loop index in the arg1 slot of
             // trap_AddCommand, which takes only the command name).
             // 1 arg
-            0 | 1 | 4 | 13 | 14 | 15 | 16 | 18 | 20 | 21 | 30 | 36 | 37 | 38 | 39 | 41 | 44 | 45 | 49
-            | 50 | 53 | 57 | 60 | 62 | 63 | 64 | 65 | 66 | 70 | 71 | 72 | 75 | 76 | 77 | 81 | 91 => 1,
+            0 | 1 | 4 | 13 | 14 | 15 | 16 | 18 | 20 | 21 | 30 | 36 | 37 | 38 | 39 | 41 | 44
+            | 45 | 49 | 50 | 53 | 57 | 60 | 62 | 63 | 64 | 65 | 66 | 70 | 71 | 72 | 75 | 76
+            | 77 | 81 | 91 => 1,
             // 0 args
             2 | 7 | 17 | 19 | 40 | 54 | 58 | 61 | 69 => 0,
             // 2 args
@@ -156,7 +157,8 @@ pub fn arity_of(m: Module, n: u32) -> Option<usize> {
     }
     Some(match n {
         // 1 arg
-        0 | 1 | 4 | 6 | 13 | 14 | 30 | 31 | 34 | 35 | 40 | 41 | 42 | 103 | 104 | 106 | 110 | 111 => 1,
+        0 | 1 | 4 | 6 | 13 | 14 | 30 | 31 | 34 | 35 | 40 | 41 | 42 | 103 | 104 | 106 | 110
+        | 111 => 1,
         // 2 args
         5 | 16 | 17 | 18 | 20 | 21 | 22 | 23 | 25 | 26 | 27 | 28 | 29 | 36 | 37 | 105 => 2,
         // 3 args
@@ -217,7 +219,7 @@ fn q_string(mem: &Memory, addr: i32) -> Option<String> {
     if s.is_empty()
         || !s
             .iter()
-            .all(|&b| b == b'\n' || b == b'\r' || b == b'\t' || (b >= 0x20 && b < 0x7f))
+            .all(|&b| b == b'\n' || b == b'\r' || b == b'\t' || (0x20..0x7f).contains(&b))
     {
         return None;
     }
@@ -337,11 +339,7 @@ impl PartialEq for TrapLog {
 /// and records a `TrapLog` per call. `base` is the blob-relative offset of the
 /// image (0 for identity-mapped full-module rebuilds); arg pointers below the
 /// stack threshold are rendered blob-relative so both sides compare equal.
-pub fn make_handler(
-    m: Module,
-    base: u32,
-    logs: Rc<RefCell<Vec<TrapLog>>>,
-) -> SyscallHandler {
+pub fn make_handler(m: Module, base: u32, logs: Rc<RefCell<Vec<TrapLog>>>) -> SyscallHandler {
     make_handler_ctrl(m, base, logs).syscall
 }
 
@@ -368,25 +366,23 @@ pub struct HandlerSnap {
     pub state: Rc<RefCell<SnapState>>,
 }
 
-pub fn make_handler_ctrl(
-    m: Module,
-    base: u32,
-    logs: Rc<RefCell<Vec<TrapLog>>>,
-) -> HandlerCtrl {
+pub fn make_handler_ctrl(m: Module, base: u32, logs: Rc<RefCell<Vec<TrapLog>>>) -> HandlerCtrl {
     let (syscall, entity_tokens) = make_handler_inner(m, base, logs, None);
-    HandlerCtrl { syscall, entity_tokens }
+    HandlerCtrl {
+        syscall,
+        entity_tokens,
+    }
 }
 
 /// Snapshot-enabled handler: cgame trap 51/52 serve a full evolving snapshot
 /// (see `write_snapshot`) instead of the zeroed buffer, so the entity-rendering
 /// path (`CG_AddPacketEntities` -> `CG_AddCEntity` -> trap 32 per entity) runs
 /// on both sides. Returns the shared `SnapState` the driver advances per frame.
-pub fn make_handler_snap(
-    m: Module,
-    base: u32,
-    logs: Rc<RefCell<Vec<TrapLog>>>,
-) -> HandlerSnap {
-    let state = Rc::new(RefCell::new(SnapState { snap_num: 2, snap_time: 1000 }));
+pub fn make_handler_snap(m: Module, base: u32, logs: Rc<RefCell<Vec<TrapLog>>>) -> HandlerSnap {
+    let state = Rc::new(RefCell::new(SnapState {
+        snap_num: 2,
+        snap_time: 1000,
+    }));
     let (syscall, _entity_tokens) = make_handler_inner(m, base, logs, Some(state.clone()));
     HandlerSnap { syscall, state }
 }
@@ -524,9 +520,9 @@ fn make_handler_inner(
             let iv = parse_int(&def);
             let fv = iv as f32;
             mem.store4(a[1], slot as i32); // handle
-            mem.store4((a[1] + 4) as i32, 0); // modificationCount
-            mem.store4((a[1] + 8) as i32, fv.to_bits() as i32); // value (float)
-            mem.store4((a[1] + 12) as i32, iv); // integer
+            mem.store4(a[1] + 4, 0); // modificationCount
+            mem.store4(a[1] + 8, fv.to_bits() as i32); // value (float)
+            mem.store4(a[1] + 12, iv); // integer
             let n = def.len().min(256);
             for i in 0..n {
                 mem.data[slot as usize + 16 + i] = def[i];
@@ -686,8 +682,8 @@ fn make_handler_inner(
             // ---- game module (qagame/qgame) ----
             (Module::Game, 3) => cvar_register(mem, a),
             (Module::Game, 10) => store4(mem, a[2], -1), // FS_FOpenFile(qpath, *f, mode): fh = -1
-            (Module::Game, 7) => store1(mem, a[2], 0),   // Cvar_VariableStringBuffer(name, buf, size)
-            (Module::Game, 22) => store1(mem, a[1], 0),  // GetServerinfo(buf, size)
+            (Module::Game, 7) => store1(mem, a[2], 0), // Cvar_VariableStringBuffer(name, buf, size)
+            (Module::Game, 22) => store1(mem, a[1], 0), // GetServerinfo(buf, size)
             (Module::Game, 37) => {
                 // GetEntityToken(buf, size): feed the harness map entity
                 // string with engine COM_Parse semantics. Previously this
@@ -703,7 +699,7 @@ fn make_handler_inner(
                 };
                 tok_ret = Some(if produced { 1 } else { 0 });
             }
-            (Module::Game, 19) => store1(mem, a[2], 0),  // GetConfigstring(index, buf, size)
+            (Module::Game, 19) => store1(mem, a[2], 0), // GetConfigstring(index, buf, size)
             (Module::Game, 20) => {
                 // GetUserinfo(clientNum, buf, size): a fixed deterministic
                 // player userinfo so G_ParseClientInfo takes the same path on
@@ -720,17 +716,17 @@ fn make_handler_inner(
             (Module::Game, 36) => usercmd(mem, a[2], a[1]), // GetUsercmd(cmdNum, *cmd)
             (Module::CGame, 55) => usercmd(mem, a[2], a[1]), // GetUserCmd(cmdNum, *cmd)
             (Module::Game, 41) => zero(mem, a[1], 32), // RealTime(qtime_t*)
-            (Module::Game, 24 | 43) => trace(mem, a),  // Trace / TraceCapsule
+            (Module::Game, 24 | 43) => trace(mem, a), // Trace / TraceCapsule
             // ---- cgame module (cgame.qvm) ----
             // cgame numbering (traps.rs cgame_trap): trap 3 = Cvar_Register and
             // trap 10 = FS_FOpenFile match game; everything else differs.
             (Module::CGame, 3) => cvar_register(mem, a),
             (Module::CGame, 10) => store4(mem, a[2], -1), // FS_FOpenFile
-            (Module::CGame, 6) => store1(mem, a[2], 0),   // Cvar_VariableStringBuffer(name, buf, size)
-            (Module::CGame, 8) => argv0(mem, a),   // Argv(arg, buf, size)
+            (Module::CGame, 6) => store1(mem, a[2], 0), // Cvar_VariableStringBuffer(name, buf, size)
+            (Module::CGame, 8) => argv0(mem, a),        // Argv(arg, buf, size)
             (Module::CGame, 25 | 26 | 83 | 84) => trace(mem, a), // CM_*(Capsule)BoxTrace(results, ...)
-            (Module::CGame, 49) => zero(mem, a[1], 256),   // GetGlconfig(&glconfig)
-            (Module::CGame, 50) => zero(mem, a[1], 24576), // GetGameState(&gs)
+            (Module::CGame, 49) => zero(mem, a[1], 256),         // GetGlconfig(&glconfig)
+            (Module::CGame, 50) => zero(mem, a[1], 24576),       // GetGameState(&gs)
             (Module::CGame, 51) => {
                 // GetCurrentSnapshotNumber(*snapshotNumber, *serverTime)
                 match &snaps {
@@ -756,19 +752,19 @@ fn make_handler_inner(
                     None => zero(mem, a[2], 8192),
                 }
             }
-            (Module::CGame, 53) => store1(mem, a[2], 0),  // GetServerCommand(cmdNum, buf, size): empty
-            (Module::CGame, 70) => zero(mem, a[1], 32),   // RealTime(qtime_t*)
-            (Module::CGame, 86) => store1(mem, a[1], 0),  // GetEntityToken(buf, size)
+            (Module::CGame, 53) => store1(mem, a[2], 0), // GetServerCommand(cmdNum, buf, size): empty
+            (Module::CGame, 70) => zero(mem, a[1], 32),  // RealTime(qtime_t*)
+            (Module::CGame, 86) => store1(mem, a[1], 0), // GetEntityToken(buf, size)
             // ---- ui module (ui.qvm) ----
             // ui numbering (traps.rs ui_trap): Cvar_Register is 50, Cvar_Set 3.
             (Module::Ui, 50) => cvar_register(mem, a),
-            (Module::Ui, 5) => store1(mem, a[2], 0),    // Cvar_VariableStringBuffer(name, buf, size)
-            (Module::Ui, 11) => argv0(mem, a),   // Argv(arg, buf, size)
-            (Module::Ui, 13) => store4(mem, a[2], -1),  // FS_FOpenFile
-            (Module::Ui, 43) => zero(mem, a[1], 256),   // GetGlconfig(&glconfig)
-            (Module::Ui, 44) => zero(mem, a[1], 1024),  // GetClientState(&cl)
-            (Module::Ui, 45) => store1(mem, a[2], 0),   // GetConfigString(index, buf, size)
-            (Module::Ui, 64) => zero(mem, a[1], 32),    // RealTime(qtime_t*)
+            (Module::Ui, 5) => store1(mem, a[2], 0), // Cvar_VariableStringBuffer(name, buf, size)
+            (Module::Ui, 11) => argv0(mem, a),       // Argv(arg, buf, size)
+            (Module::Ui, 13) => store4(mem, a[2], -1), // FS_FOpenFile
+            (Module::Ui, 43) => zero(mem, a[1], 256), // GetGlconfig(&glconfig)
+            (Module::Ui, 44) => zero(mem, a[1], 1024), // GetClientState(&cl)
+            (Module::Ui, 45) => store1(mem, a[2], 0), // GetConfigString(index, buf, size)
+            (Module::Ui, 64) => zero(mem, a[1], 32), // RealTime(qtime_t*)
             _ => {}
         }
         if std::env::var("QVM_DUMP_SQRT").is_ok() && num == 106 {
@@ -805,9 +801,14 @@ fn make_handler_inner(
                 args.push(format!("{v}"));
             }
         }
-        logs.borrow_mut().push(TrapLog { num: num as u32, name: tname, args, raw: a[..nargs + 1].to_vec() });
+        logs.borrow_mut().push(TrapLog {
+            num: num as u32,
+            name: tname,
+            args,
+            raw: a[..nargs + 1].to_vec(),
+        });
         match num as u32 {
-            10 => -1, // FS_FOpenFile: file not found (no game files in the sandbox)
+            10 => -1,                   // FS_FOpenFile: file not found (no game files in the sandbox)
             37 => tok_ret.unwrap_or(0), // GetEntityToken: token / EOF (set above)
             52 if snaps.is_some() => 1, // snapshot served successfully
             // Opt-in UI models for Game Options / crosshair ownerdraw coverage
@@ -879,7 +880,8 @@ pub fn run_once(
     max_steps: usize,
 ) -> (Vec<TrapLog>, i32, usize, usize) {
     let logs: Rc<RefCell<Vec<TrapLog>>> = Rc::new(RefCell::new(Vec::new()));
-    let mut emu = crate::Emu::new(insns, qvm).with_syscall(make_handler(qvm.module, 0, logs.clone()));
+    let mut emu =
+        crate::Emu::new(insns, qvm).with_syscall(make_handler(qvm.module, 0, logs.clone()));
     emu.set_max_steps(max_steps);
     let result = emu.call(entry, call_args).unwrap_or(i32::MIN);
     let stats = emu.stats;

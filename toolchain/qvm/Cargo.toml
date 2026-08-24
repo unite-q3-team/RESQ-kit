@@ -6,3 +6,8 @@ license = "MIT"
 description = "QVM (Quake 3 VM) toolchain: loader, disasm, cfg, decompile, emu"
 
 [dependencies]
+
+[lints.clippy]
+# Instruction/byte indexes are domain values here (dst + i, i + 1, ...), so
+# rewriting indexed loops to iterators hurts readability.
+needless_range_loop = "allow"

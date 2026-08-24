@@ -42,11 +42,17 @@ pub enum Expr {
     /// Unknown value / phi placeholder: the runtime value of stack slot `i`.
     Slot(usize),
     /// Value of a stack local at `off` (result of `LOCAL off` + `LOAD`).
-    Local { off: usize, size: LoadSize },
+    Local {
+        off: usize,
+        size: LoadSize,
+    },
     /// Address of a stack local (`LOCAL off`).
     AddrLocal(usize),
     /// Reference into the data/lit segment at byte `addr`.
-    GlobalRef { addr: usize, size: LoadSize },
+    GlobalRef {
+        addr: usize,
+        size: LoadSize,
+    },
     /// Dereference of an arbitrary address.
     MemRef(Box<Expr>, LoadSize),
     /// Unary operator.
@@ -72,7 +78,9 @@ impl Expr {
             Expr::Unop(_, a) => a.contains_slot(slot),
             Expr::Binop(_, a, b) => a.contains_slot(slot) || b.contains_slot(slot),
             Expr::MemRef(a, _) => a.contains_slot(slot),
-            Expr::Call(t, args) => t.contains_slot(slot) || args.iter().any(|a| a.contains_slot(slot)),
+            Expr::Call(t, args) => {
+                t.contains_slot(slot) || args.iter().any(|a| a.contains_slot(slot))
+            }
             Expr::Trap(_, args) => args.iter().any(|a| a.contains_slot(slot)),
             Expr::Float(a) => a.contains_slot(slot),
             _ => false,
@@ -86,7 +94,11 @@ pub enum Stmt {
     /// `s<slot> = value` (kept only if the slot is read across blocks).
     Assign { slot: usize, value: Expr },
     /// `*addr = value`.
-    Store { addr: Expr, value: Expr, size: LoadSize },
+    Store {
+        addr: Expr,
+        value: Expr,
+        size: LoadSize,
+    },
     /// `memcpy(dest, src, count)`.
     BlockCopy { dest: Expr, src: Expr, count: i32 },
 }
@@ -96,11 +108,18 @@ pub enum Stmt {
 pub enum Terminator {
     Return(Option<Expr>),
     Goto(usize),
-    IfGoto { cond: Expr, target: usize },
+    IfGoto {
+        cond: Expr,
+        target: usize,
+    },
     /// Resolved jump table: `switch (sel) { case k: goto target_insn; }`.
     /// `default` is the bounds-check default target (both LTI/GTI checks jump
     /// there), as an instruction index.
-    Switch { sel: Box<Expr>, cases: Vec<(i32, usize)>, default: Option<usize> },
+    Switch {
+        sel: Box<Expr>,
+        cases: Vec<(i32, usize)>,
+        default: Option<usize>,
+    },
     /// Indirect jump we could not resolve statically.
     Unresolved(Expr),
     Fallthrough,
@@ -133,9 +152,10 @@ pub fn net_stack_effect(op: Opcode) -> i32 {
         Const | Local | Push => 1,
         Pop | Arg | Jump => -1,
         Store1 | Store2 | Store4 | BlockCopy => -2,
-        Eq | Ne | Lti | Lei | Gti | Gei | Ltu | Leu | Gtu | Geu | Eqf | Nef | Ltf | Lef | Gtf | Gef => -2,
-        Add | Sub | Divi | Divu | Modi | Modu | Muli | Mulu | Band | Bor | Bxor | Lsh | Rshi | Rshu
-        | AddF | SubF | DivF | MulF => -1,
+        Eq | Ne | Lti | Lei | Gti | Gei | Ltu | Leu | Gtu | Geu | Eqf | Nef | Ltf | Lef | Gtf
+        | Gef => -2,
+        Add | Sub | Divi | Divu | Modi | Modu | Muli | Mulu | Band | Bor | Bxor | Lsh | Rshi
+        | Rshu | AddF | SubF | DivF | MulF => -1,
         _ => 0, // Call, Load*, Enter, Leave, unary, Undef, Ignore, Break
     }
 }
@@ -215,15 +235,19 @@ fn track_step(op: Opcode, operand: i32, st: &mut ValStack) {
             st.pop();
             st.pop();
         }
-        Eq | Ne | Lti | Lei | Gti | Gei | Ltu | Leu | Gtu | Geu | Eqf | Nef | Ltf | Lef | Gtf | Gef => {
+        Eq | Ne | Lti | Lei | Gti | Gei | Ltu | Leu | Gtu | Geu | Eqf | Nef | Ltf | Lef | Gtf
+        | Gef => {
             st.pop();
             st.pop();
         }
-        Add | Sub | Divi | Divu | Modi | Modu | Muli | Mulu | Band | Bor | Bxor | Lsh | Rshi | Rshu => {
+        Add | Sub | Divi | Divu | Modi | Modu | Muli | Mulu | Band | Bor | Bxor | Lsh | Rshi
+        | Rshu => {
             let b = st.pop().flatten();
             let a = st.pop().flatten();
             let e = match (a, b) {
-                (Some(x), Some(y)) => Some(simplify(Expr::Binop(int_op(op), Box::new(x), Box::new(y)))),
+                (Some(x), Some(y)) => {
+                    Some(simplify(Expr::Binop(int_op(op), Box::new(x), Box::new(y))))
+                }
                 _ => None,
             };
             st.push(e);
@@ -243,19 +267,27 @@ fn track_step(op: Opcode, operand: i32, st: &mut ValStack) {
         }
         Negi | Bcom => {
             if let Some(x) = st.last_mut() {
-                *x = x.clone().map(|e| simplify(Expr::Unop(un_op(op), Box::new(e))));
+                *x = x
+                    .clone()
+                    .map(|e| simplify(Expr::Unop(un_op(op), Box::new(e))));
             }
         }
         Negf => {
             if let Some(x) = st.last_mut() {
-                *x = x.clone().map(|e| simplify(Expr::Unop("-", Box::new(as_float(e)))));
+                *x = x
+                    .clone()
+                    .map(|e| simplify(Expr::Unop("-", Box::new(as_float(e)))));
             }
         }
         Sex8 | Sex16 => {
             // sign-extend the low byte/word: mark the value with a signed-cast
             // marker so it is rendered as a signed load (lcc re-emits SEX8/SEX16).
             if let Some(x) = st.last_mut() {
-                let marker = if matches!(op, Sex8) { "(signed char)" } else { "(signed short)" };
+                let marker = if matches!(op, Sex8) {
+                    "(signed char)"
+                } else {
+                    "(signed short)"
+                };
                 *x = x.clone().map(|e| Expr::Unop(marker, Box::new(e)));
             }
         }
@@ -312,7 +344,7 @@ struct Lower<'a> {
 
 impl<'a> Lower<'a> {
     fn read_cell(&mut self, st: &mut Vec<Cell>, from_top: usize, next_id: &mut usize) -> Expr {
-        let depth = st.len().checked_sub(from_top).unwrap_or(0);
+        let depth = st.len().saturating_sub(from_top);
         while st.len() <= depth {
             let id = *next_id;
             *next_id += 1;
@@ -328,7 +360,14 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn write_cell(&mut self, st: &mut Track, depth: usize, val: Expr, body: &mut Vec<Stmt>, next_id: &mut usize) {
+    fn write_cell(
+        &mut self,
+        st: &mut Track,
+        depth: usize,
+        val: Expr,
+        body: &mut Vec<Stmt>,
+        next_id: &mut usize,
+    ) {
         while st.len() <= depth {
             let id = *next_id;
             *next_id += 1;
@@ -336,8 +375,14 @@ impl<'a> Lower<'a> {
         }
         let id = *next_id;
         *next_id += 1;
-        st[depth] = Cell { value: Some(val.clone()), id };
-        body.push(Stmt::Assign { slot: id, value: val });
+        st[depth] = Cell {
+            value: Some(val.clone()),
+            id,
+        };
+        body.push(Stmt::Assign {
+            slot: id,
+            value: val,
+        });
     }
 }
 
@@ -513,7 +558,10 @@ pub fn simplify(e: Expr) -> Expr {
     match e {
         Expr::MemRef(addr, size) => match *addr {
             Expr::AddrLocal(off) => Expr::Local { off, size },
-            Expr::Const(c) => Expr::GlobalRef { addr: c as usize, size },
+            Expr::Const(c) => Expr::GlobalRef {
+                addr: c as usize,
+                size,
+            },
             a => Expr::MemRef(Box::new(a), size),
         },
         Expr::Binop(op, a, b) => {
@@ -625,7 +673,14 @@ fn decompile_function_raw(d: &Disassembly, cfg: &CFG, frame: i32, data: &[i32]) 
     }
 
     // ---- pass 2: lowering ----
-    let mut lower = Lower { d, cfg, data, reads: std::collections::BTreeSet::new(), local_consts: HashMap::new(), absorb_blocks: Vec::new() };
+    let mut lower = Lower {
+        d,
+        cfg,
+        data,
+        reads: std::collections::BTreeSet::new(),
+        local_consts: HashMap::new(),
+        absorb_blocks: Vec::new(),
+    };
     let mut next_id = 0usize;
     let mut post: Vec<Option<Track>> = vec![None; nblocks];
     let mut post_lc: Vec<Option<HashMap<usize, i32>>> = vec![None; nblocks];
@@ -662,7 +717,11 @@ fn decompile_function_raw(d: &Disassembly, cfg: &CFG, frame: i32, data: &[i32]) 
                     None => all_known = false,
                 }
             }
-            if all_known && !first { merge } else { HashMap::new() }
+            if all_known && !first {
+                merge
+            } else {
+                HashMap::new()
+            }
         };
         lower.local_consts = lc_in;
         let (blk, exit, exit_args) = lower_block(&mut lower, bi, entry, args_in, &mut next_id);
@@ -714,9 +773,7 @@ fn subst_slots(e: &Expr, subst: &HashMap<usize, Expr>) -> Expr {
             Box::new(subst_slots(t, subst)),
             args.iter().map(|a| subst_slots(a, subst)).collect(),
         ),
-        Expr::Trap(n, args) => {
-            Expr::Trap(*n, args.iter().map(|a| subst_slots(a, subst)).collect())
-        }
+        Expr::Trap(n, args) => Expr::Trap(*n, args.iter().map(|a| subst_slots(a, subst)).collect()),
         Expr::Float(a) => Expr::Float(Box::new(subst_slots(a, subst))),
         other => other.clone(),
     }
@@ -813,7 +870,7 @@ fn inline_single_use_slots(f: &mut Function) {
         match &mut b.term {
             Terminator::Return(Some(v)) => *v = subst_slots(v, &subst),
             Terminator::IfGoto { cond, .. } => *cond = subst_slots(cond, &subst),
-            Terminator::Switch { sel, .. } => *sel = Box::new(subst_slots(sel, &subst)),
+            Terminator::Switch { sel, .. } => **sel = subst_slots(sel, &subst),
             Terminator::Unresolved(a) => *a = subst_slots(a, &subst),
             _ => {}
         }
@@ -1006,6 +1063,11 @@ fn switch_bounds(
 }
 
 /// Collect the switch cases `(case_value, target_insn)` for an lcc dispatch.
+/// Resolved jump table: selector expression, `(case value, target insn)` pairs
+/// sorted as emitted, optional default target, and the bound-check blocks the
+/// switch absorbed.
+type SwitchLayout = (Expr, Vec<(i32, usize)>, Option<usize>, Vec<usize>);
+
 /// Indexing is `sel << 2 + base`, so the case window is given by the bounds
 /// checks [lo, hi] (or, as a fallback, by scanning from entry 0).
 /// Returns `(sel, cases, default_insn, absorbed_bound_blocks)`.
@@ -1016,12 +1078,16 @@ fn resolve_switch(
     data: &[i32],
     bi: usize,
     local_consts: &HashMap<usize, i32>,
-) -> Option<(Expr, Vec<(i32, usize)>, Option<usize>, Vec<usize>)> {
-    let Expr::MemRef(inner, size) = addr else { return None };
+) -> Option<SwitchLayout> {
+    let Expr::MemRef(inner, size) = addr else {
+        return None;
+    };
     if *size != LoadSize::I4 {
         return None;
     }
-    let Expr::Binop("+", a, b) = inner.as_ref() else { return None };
+    let Expr::Binop("+", a, b) = inner.as_ref() else {
+        return None;
+    };
     let (sel, shift) = match (a.as_ref(), b.as_ref()) {
         (Expr::Binop("<<", s, sh), Expr::Const(_)) | (Expr::Const(_), Expr::Binop("<<", s, sh)) => {
             match (s.as_ref(), sh.as_ref()) {
@@ -1040,7 +1106,7 @@ fn resolve_switch(
         return None; // only 4-byte index tables for now
     }
     let base = base as usize;
-    if base % 4 != 0 || base / 4 >= data.len() {
+    if !base.is_multiple_of(4) || base / 4 >= data.len() {
         return None;
     }
 
@@ -1105,8 +1171,7 @@ fn resolve_switch(
                 return false;
             };
             let preds = &cfg.blocks[dbi].pred;
-            !preds.is_empty()
-                && preds.iter().all(|p| absorb.contains(&cfg.blocks[*p].start))
+            !preds.is_empty() && preds.iter().all(|p| absorb.contains(&cfg.blocks[*p].start))
         })
         .map(|(dflt, _)| *dflt);
     let absorb = bound.map(|(_, absorb)| absorb).unwrap_or_default();
@@ -1144,7 +1209,13 @@ fn lower_block(
             }
             Local => {
                 let depth = st.len();
-                lower.write_cell(&mut st, depth, Expr::AddrLocal(operand as usize), &mut body, next_id);
+                lower.write_cell(
+                    &mut st,
+                    depth,
+                    Expr::AddrLocal(operand as usize),
+                    &mut body,
+                    next_id,
+                );
             }
             Push => {
                 let id = *next_id;
@@ -1189,12 +1260,10 @@ fn lower_block(
                 let addr = lower.read_cell(&mut st, 1, next_id);
                 st.pop();
                 let v = match (&addr, size) {
-                    (Expr::AddrLocal(off), LoadSize::I4) => {
-                        match lower.local_consts.get(off) {
-                            Some(c) => Expr::Const(*c),
-                            None => simplify(Expr::MemRef(Box::new(addr), size)),
-                        }
-                    }
+                    (Expr::AddrLocal(off), LoadSize::I4) => match lower.local_consts.get(off) {
+                        Some(c) => Expr::Const(*c),
+                        None => simplify(Expr::MemRef(Box::new(addr), size)),
+                    },
                     _ => simplify(Expr::MemRef(Box::new(addr), size)),
                 };
                 let depth = st.len();
@@ -1253,9 +1322,14 @@ fn lower_block(
                         ks + 4 <= lo || ks >= hi
                     });
                 }
-                body.push(Stmt::BlockCopy { dest, src, count: operand });
+                body.push(Stmt::BlockCopy {
+                    dest,
+                    src,
+                    count: operand,
+                });
             }
-            Eq | Ne | Lti | Lei | Gti | Gei | Ltu | Leu | Gtu | Geu | Eqf | Nef | Ltf | Lef | Gtf | Gef => {
+            Eq | Ne | Lti | Lei | Gti | Gei | Ltu | Leu | Gtu | Geu | Eqf | Nef | Ltf | Lef
+            | Gtf | Gef => {
                 let r1 = lower.read_cell(&mut st, 2, next_id);
                 let r0 = lower.read_cell(&mut st, 1, next_id);
                 st.pop();
@@ -1263,7 +1337,8 @@ fn lower_block(
                 // cond computed in terminator; nothing to emit here
                 let _ = (r1, r0);
             }
-            Add | Sub | Divi | Divu | Modi | Modu | Muli | Mulu | Band | Bor | Bxor | Lsh | Rshi | Rshu => {
+            Add | Sub | Divi | Divu | Modi | Modu | Muli | Mulu | Band | Bor | Bxor | Lsh
+            | Rshi | Rshu => {
                 let b = lower.read_cell(&mut st, 1, next_id);
                 let a = lower.read_cell(&mut st, 2, next_id);
                 st.pop();
@@ -1284,13 +1359,13 @@ fn lower_block(
             Negi | Bcom => {
                 let a = lower.read_cell(&mut st, 1, next_id);
                 let v = simplify(Expr::Unop(un_op(op), Box::new(a)));
-                let depth = st.len().checked_sub(1).unwrap_or(0);
+                let depth = st.len().saturating_sub(1);
                 lower.write_cell(&mut st, depth, v, &mut body, next_id);
             }
             Negf => {
                 let a = as_float(lower.read_cell(&mut st, 1, next_id));
                 let v = simplify(Expr::Unop("-", Box::new(a)));
-                let depth = st.len().checked_sub(1).unwrap_or(0);
+                let depth = st.len().saturating_sub(1);
                 lower.write_cell(&mut st, depth, v, &mut body, next_id);
             }
             Sex8 | Sex16 => {
@@ -1301,21 +1376,25 @@ fn lower_block(
                 // on the unsigned load would compile to CVUI4 -> IGNORE and
                 // silently drop the sign extension.
                 let a = lower.read_cell(&mut st, 1, next_id);
-                let marker = if matches!(op, Sex8) { "(signed char)" } else { "(signed short)" };
+                let marker = if matches!(op, Sex8) {
+                    "(signed char)"
+                } else {
+                    "(signed short)"
+                };
                 let v = simplify(Expr::Unop(marker, Box::new(a)));
-                let depth = st.len().checked_sub(1).unwrap_or(0);
+                let depth = st.len().saturating_sub(1);
                 lower.write_cell(&mut st, depth, v, &mut body, next_id);
             }
             Cvif => {
                 let a = lower.read_cell(&mut st, 1, next_id);
                 let v = cvif_expr(a);
-                let depth = st.len().checked_sub(1).unwrap_or(0);
+                let depth = st.len().saturating_sub(1);
                 lower.write_cell(&mut st, depth, v, &mut body, next_id);
             }
             Cvfi => {
                 let a = lower.read_cell(&mut st, 1, next_id);
                 let v = cvfi_expr(a);
-                let depth = st.len().checked_sub(1).unwrap_or(0);
+                let depth = st.len().saturating_sub(1);
                 lower.write_cell(&mut st, depth, v, &mut body, next_id);
             }
             Enter | Leave | Undef | Ignore | Break => {}
@@ -1354,7 +1433,9 @@ fn lower_block(
                     None => Expr::Slot(0),
                 };
                 // try to resolve an indirect jump through a data jump table (switch)
-                if let Some((sel, cases, default, absorb)) = resolve_switch(&addr, d, cfg, lower.data, bi, &lower.local_consts) {
+                if let Some((sel, cases, default, absorb)) =
+                    resolve_switch(&addr, d, cfg, lower.data, bi, &lower.local_consts)
+                {
                     // Absorbing a guard block (LTI/GTI bound check) replaces its
                     // conditional branch with plain fallthrough, relying on the
                     // switch's emitted `default:` to reproduce the "out of range"
@@ -1381,7 +1462,11 @@ fn lower_block(
                         // `default`, not silently fall into that shared
                         // target. Keep it as a real Switch so the emitter
                         // preserves the range guard.
-                        Terminator::Switch { sel: Box::new(sel), cases, default }
+                        Terminator::Switch {
+                            sel: Box::new(sel),
+                            cases,
+                            default,
+                        }
                     }
                 } else {
                     Terminator::Unresolved(addr)
@@ -1402,13 +1487,24 @@ fn lower_block(
             } else {
                 simplify(Expr::Binop(cmp_op(op), Box::new(r1), Box::new(r0)))
             };
-            Terminator::IfGoto { cond, target: last.target.unwrap_or(0) }
+            Terminator::IfGoto {
+                cond,
+                target: last.target.unwrap_or(0),
+            }
         }
         _ => Terminator::Fallthrough,
     };
 
     let exit = st;
-    (LoweredBlock { start: b.start, body, term }, exit, args)
+    (
+        LoweredBlock {
+            start: b.start,
+            body,
+            term,
+        },
+        exit,
+        args,
+    )
 }
 
 fn is_float_cmp(op: Opcode) -> bool {
@@ -1466,7 +1562,11 @@ pub fn fmt_expr(q: &Qvm, frame: i32, e: &Expr) -> String {
                     fmt_expr(q, frame, b)
                 )
             } else {
-                format!("({}) {op} ({})", fmt_expr(q, frame, a), fmt_expr(q, frame, b))
+                format!(
+                    "({}) {op} ({})",
+                    fmt_expr(q, frame, a),
+                    fmt_expr(q, frame, b)
+                )
             }
         }
         Expr::Call(t, args) => {
@@ -1511,7 +1611,7 @@ fn stack_name(frame: i32, off: usize) -> String {
     let f = frame as usize;
     if off < f {
         format!("loc_{off}")
-    } else if off >= f + 8 && (off - f - 8) % 4 == 0 {
+    } else if off >= f + 8 && (off - f - 8).is_multiple_of(4) {
         format!("arg_{}", (off - f - 8) / 4)
     } else {
         format!("sp_{off}")
@@ -1523,8 +1623,8 @@ fn mem_ref(q: &Qvm, addr: usize, size: LoadSize) -> String {
     let ll = q.lit_length as usize;
     if addr < dl {
         match size {
-            LoadSize::I4 if addr % 4 == 0 => format!("data_i32[{}]", addr / 4),
-            LoadSize::I2 if addr % 2 == 0 => format!("data_i16[{}]", addr / 2),
+            LoadSize::I4 if addr.is_multiple_of(4) => format!("data_i32[{}]", addr / 4),
+            LoadSize::I2 if addr.is_multiple_of(2) => format!("data_i16[{}]", addr / 2),
             _ => format!("data_i8[{addr}]"),
         }
     } else if addr < dl + ll {
@@ -1547,7 +1647,7 @@ pub fn reachable_blocks(f: &Function) -> Vec<bool> {
     reach[0] = true;
     while let Some(bi) = queue.pop() {
         let b = &f.blocks[bi];
-                let mark = |t: usize, reach: &mut Vec<bool>, queue: &mut Vec<usize>| {
+        let mark = |t: usize, reach: &mut Vec<bool>, queue: &mut Vec<usize>| {
             if let Some(&j) = by_start.get(&t) {
                 if !reach[j] {
                     reach[j] = true;
@@ -1597,7 +1697,10 @@ pub fn fmt_function(f: &Function, q: &Qvm) -> String {
         }
     }
     let mut out = String::new();
-    out.push_str(&format!("// function @ insn {}..{} frame {}\n", f.start, f.end, f.frame));
+    out.push_str(&format!(
+        "// function @ insn {}..{} frame {}\n",
+        f.start, f.end, f.frame
+    ));
     out.push_str("void fn() {\n");
     for (bi, b) in f.blocks.iter().enumerate() {
         if !reach[bi] {
@@ -1647,12 +1750,22 @@ pub fn fmt_function(f: &Function, q: &Qvm) -> String {
             Terminator::Return(None) => out.push_str("  return;\n"),
             Terminator::Goto(t) => out.push_str(&format!("  goto L{t};\n")),
             Terminator::IfGoto { cond, target } => {
-                out.push_str(&format!("  if ({}) goto L{target};\n", fmt_expr(q, f.frame, cond)));
+                out.push_str(&format!(
+                    "  if ({}) goto L{target};\n",
+                    fmt_expr(q, f.frame, cond)
+                ));
             }
             Terminator::Unresolved(a) => {
-                out.push_str(&format!("  goto /* indirect */ ({});\n", fmt_expr(q, f.frame, a)));
+                out.push_str(&format!(
+                    "  goto /* indirect */ ({});\n",
+                    fmt_expr(q, f.frame, a)
+                ));
             }
-            Terminator::Switch { sel, cases, default } => {
+            Terminator::Switch {
+                sel,
+                cases,
+                default,
+            } => {
                 let mut counts: HashMap<usize, usize> = HashMap::new();
                 for (_, t) in cases {
                     *counts.entry(*t).or_insert(0) += 1;
@@ -1715,8 +1828,16 @@ mod tests {
 
     fn qvm_from_parts(code: &[u8], data: &[u8], instr_count: i32) -> crate::loader::Qvm {
         let mut f = Vec::new();
-        for v in [0x12721444u32, instr_count as u32, 32u32, code.len() as u32,
-                  32 + code.len() as u32, data.len() as u32, 0u32, 0u32] {
+        for v in [
+            0x12721444u32,
+            instr_count as u32,
+            32u32,
+            code.len() as u32,
+            32 + code.len() as u32,
+            data.len() as u32,
+            0u32,
+            0u32,
+        ] {
             f.extend_from_slice(&v.to_le_bytes());
         }
         f.extend_from_slice(code);
@@ -1730,17 +1851,8 @@ mod tests {
         // #0 ENTER 0; #1 LOCAL 36; #2 LOAD4 (sel=arg0); #3 CONST 2; #4 LSH;
         // #5 CONST 4; #6 ADD; #7 LOAD4; #8 JUMP; #9 LEAVE 0; #10 LEAVE 0
         let code = [
-            0x03, 0, 0, 0, 0,
-            0x09, 36, 0, 0, 0,
-            0x1d,
-            0x08, 2, 0, 0, 0,
-            0x32,
-            0x08, 4, 0, 0, 0,
-            0x26,
-            0x1d,
-            0x0a,
-            0x04, 0, 0, 0, 0,
-            0x04, 0, 0, 0, 0,
+            0x03, 0, 0, 0, 0, 0x09, 36, 0, 0, 0, 0x1d, 0x08, 2, 0, 0, 0, 0x32, 0x08, 4, 0, 0, 0,
+            0x26, 0x1d, 0x0a, 0x04, 0, 0, 0, 0, 0x04, 0, 0, 0, 0,
         ];
         let data = [0u8, 0, 0, 0, 9, 0, 0, 0, 10, 0, 0, 0];
         let q = qvm_from_parts(&code, &data, 11);
@@ -1748,9 +1860,17 @@ mod tests {
         let data_words = q.data_int32();
         let cfg = build_cfg(&d, (0, 11), &data_words).unwrap();
         let f = decompile_function(&d, &cfg, 0, &data_words);
-        let dispatch = f.blocks.iter().find(|b| matches!(b.term, Terminator::Switch { .. })).expect("switch");
+        let dispatch = f
+            .blocks
+            .iter()
+            .find(|b| matches!(b.term, Terminator::Switch { .. }))
+            .expect("switch");
         match &dispatch.term {
-            Terminator::Switch { sel, cases, default } => {
+            Terminator::Switch {
+                sel,
+                cases,
+                default,
+            } => {
                 assert_eq!(cases, &vec![(0, 9), (1, 10)]);
                 assert_eq!(*default, None, "no bounds checks -> no default");
                 // sel must not be folded to a constant (it is the argument)
@@ -1774,38 +1894,17 @@ mod tests {
         // #23 LEAVE 0       dead
         // #24 LEAVE 0       default
         let code = [
-            0x03, 0, 0, 0, 0,
-            0x09, 12, 0, 0, 0,
-            0x08, 2, 0, 0, 0,
-            0x20,
-            0x09, 36, 0, 0, 0,
-            0x1d,
-            0x09, 12, 0, 0, 0,
-            0x1d,
-            0x0d, 24, 0, 0, 0,
-            0x09, 36, 0, 0, 0,
-            0x1d,
-            0x08, 3, 0, 0, 0,
-            0x0f, 24, 0, 0, 0,
-            0x09, 36, 0, 0, 0,
-            0x1d,
-            0x08, 2, 0, 0, 0,
-            0x32,
-            0x08, 8, 0, 0, 0,
-            0x26,
-            0x1d,
-            0x0a,
-            0x04, 0, 0, 0, 0,
-            0x04, 0, 0, 0, 0,
-            0x04, 0, 0, 0, 0,
-            0x04, 0, 0, 0, 0,
+            0x03, 0, 0, 0, 0, 0x09, 12, 0, 0, 0, 0x08, 2, 0, 0, 0, 0x20, 0x09, 36, 0, 0, 0, 0x1d,
+            0x09, 12, 0, 0, 0, 0x1d, 0x0d, 24, 0, 0, 0, 0x09, 36, 0, 0, 0, 0x1d, 0x08, 3, 0, 0, 0,
+            0x0f, 24, 0, 0, 0, 0x09, 36, 0, 0, 0, 0x1d, 0x08, 2, 0, 0, 0, 0x32, 0x08, 8, 0, 0, 0,
+            0x26, 0x1d, 0x0a, 0x04, 0, 0, 0, 0, 0x04, 0, 0, 0, 0, 0x04, 0, 0, 0, 0, 0x04, 0, 0, 0,
+            0,
         ];
         // table at data offset 8 = word 2: words[2]=junk, [3]=0 sentinel,
         // [4]=21 (sel 2), [5]=22 (sel 3)
         let data = [
-            0x0f, 0x27, 0, 0, 0, 0, 0, 0,
-            0x0f, 0x27, 0, 0, 0, 0, 0, 0,
-            0x15, 0, 0, 0, 0x16, 0, 0, 0,
+            0x0f, 0x27, 0, 0, 0, 0, 0, 0, 0x0f, 0x27, 0, 0, 0, 0, 0, 0, 0x15, 0, 0, 0, 0x16, 0, 0,
+            0,
         ];
         let q = qvm_from_parts(&code, &data, 25);
         let d = disassemble(&q).unwrap();
@@ -1828,7 +1927,10 @@ mod tests {
         // the dispatch renders as a switch with a default
         let out = fmt_function(&f, &q);
         assert!(out.contains("default:"), "default in output: {out}");
-        assert!(!out.contains("indirect"), "dispatch resolved, no indirect: {out}");
+        assert!(
+            !out.contains("indirect"),
+            "dispatch resolved, no indirect: {out}"
+        );
     }
 
     #[test]
@@ -1836,18 +1938,17 @@ mod tests {
         // indirect jump through a stack slot, no table:
         // #0 ENTER 0; #1 LOCAL 36; #2 LOAD4; #3 JUMP; #4 LEAVE 0
         let code = [
-            0x03, 0, 0, 0, 0,
-            0x09, 36, 0, 0, 0,
-            0x1d,
-            0x0a,
-            0x04, 0, 0, 0, 0,
+            0x03, 0, 0, 0, 0, 0x09, 36, 0, 0, 0, 0x1d, 0x0a, 0x04, 0, 0, 0, 0,
         ];
         let q = qvm_from_parts(&code, &[], 5);
         let d = disassemble(&q).unwrap();
         let data_words = q.data_int32();
         let cfg = build_cfg(&d, (0, 5), &data_words).unwrap();
         let f = decompile_function(&d, &cfg, 0, &data_words);
-        assert!(f.blocks.iter().any(|b| matches!(b.term, Terminator::Unresolved(_))));
+        assert!(f
+            .blocks
+            .iter()
+            .any(|b| matches!(b.term, Terminator::Unresolved(_))));
     }
 
     #[test]
@@ -1858,17 +1959,8 @@ mod tests {
         // #4 LOCAL 4; #5 CONST 100; #6 CALL; #7 STORE4   loc_4 = fn_100(arg_0)
         // #8 LOCAL 4; #9 LOAD4; #10 LEAVE 12        return loc_4
         let code = [
-            0x03, 12, 0, 0, 0,
-            0x09, 20, 0, 0, 0,
-            0x1d,
-            0x21, 8,
-            0x09, 4, 0, 0, 0,
-            0x08, 100, 0, 0, 0,
-            0x05,
-            0x20,
-            0x09, 4, 0, 0, 0,
-            0x1d,
-            0x04, 12, 0, 0, 0,
+            0x03, 12, 0, 0, 0, 0x09, 20, 0, 0, 0, 0x1d, 0x21, 8, 0x09, 4, 0, 0, 0, 0x08, 100, 0, 0,
+            0, 0x05, 0x20, 0x09, 4, 0, 0, 0, 0x1d, 0x04, 12, 0, 0, 0,
         ];
         let q = qvm_from_parts(&code, &[], 11);
         let d = disassemble(&q).unwrap();
@@ -1876,9 +1968,15 @@ mod tests {
         let cfg = build_cfg(&d, (0, 11), &data_words).unwrap();
         let f = decompile_function(&d, &cfg, 12, &data_words);
         let out = fmt_function(&f, &q);
-        assert!(out.contains("loc_4 = fn_100(arg_0);"), "slot inlined into store: {out}");
+        assert!(
+            out.contains("loc_4 = fn_100(arg_0);"),
+            "slot inlined into store: {out}"
+        );
         assert!(out.contains("return loc_4;"), "return kept: {out}");
-        assert!(!out.lines().any(|l| l.trim_start().starts_with("s")), "no sN assigns: {out}");
+        assert!(
+            !out.lines().any(|l| l.trim_start().starts_with("s")),
+            "no sN assigns: {out}"
+        );
     }
 
     #[test]
@@ -1895,11 +1993,9 @@ mod tests {
         // #9 LOCAL 36; #10 LOCAL 12; #11 LOAD4; #12 STORE4  refdef.width = w
         // #13 LEAVE 0
         let code = [
-            0x03, 0, 0, 0, 0,
-            0x09, 12, 0, 0, 0, 0x08, 0x00, 0x00, 0x20, 0x44, 0x20,
-            0x09, 12, 0, 0, 0, 0x21, 8, 0x08, 100, 0, 0, 0, 0x05, 0x07,
-            0x09, 36, 0, 0, 0, 0x09, 12, 0, 0, 0, 0x1d, 0x20,
-            0x04, 0, 0, 0, 0,
+            0x03, 0, 0, 0, 0, 0x09, 12, 0, 0, 0, 0x08, 0x00, 0x00, 0x20, 0x44, 0x20, 0x09, 12, 0,
+            0, 0, 0x21, 8, 0x08, 100, 0, 0, 0, 0x05, 0x07, 0x09, 36, 0, 0, 0, 0x09, 12, 0, 0, 0,
+            0x1d, 0x20, 0x04, 0, 0, 0, 0,
         ];
         let q = qvm_from_parts(&code, &[], 14);
         let d = disassemble(&q).unwrap();
@@ -1941,17 +2037,12 @@ mod tests {
         // #31..33 CONST -4; CALL; POP        trap_Cvar_Register(...)
         // #34     LEAVE 0
         let code = [
-            0x03, 0, 0, 0, 0,
-            0x09, 36, 0, 0, 0, 0x1d, 0x1d, 0x08, 0x38, 0xa4, 0x03, 0x00,
-            0x0c, 34, 0, 0, 0,
-            0x09, 36, 0, 0, 0, 0x1d, 0x1d, 0x21, 8,
-            0x09, 36, 0, 0, 0, 0x1d, 0x08, 4, 0, 0, 0, 0x26, 0x1d, 0x21, 12,
-            0x08, 0, 0, 0, 0, 0x08, 1, 0, 0, 0, 0x0c, 22, 0, 0, 0,
-            0x09, 76, 0, 0, 0, 0x08, 0x69, 0x65, 0, 0, 0x20,
-            0x09, 76, 0, 0, 0, 0x1d, 0x21, 16,
-            0x09, 36, 0, 0, 0, 0x1d, 0x08, 12, 0, 0, 0, 0x26, 0x1d, 0x21, 20,
-            0x08, 0xfc, 0xff, 0xff, 0xff, 0x05, 0x07,
-            0x04, 0, 0, 0, 0,
+            0x03, 0, 0, 0, 0, 0x09, 36, 0, 0, 0, 0x1d, 0x1d, 0x08, 0x38, 0xa4, 0x03, 0x00, 0x0c,
+            34, 0, 0, 0, 0x09, 36, 0, 0, 0, 0x1d, 0x1d, 0x21, 8, 0x09, 36, 0, 0, 0, 0x1d, 0x08, 4,
+            0, 0, 0, 0x26, 0x1d, 0x21, 12, 0x08, 0, 0, 0, 0, 0x08, 1, 0, 0, 0, 0x0c, 22, 0, 0, 0,
+            0x09, 76, 0, 0, 0, 0x08, 0x69, 0x65, 0, 0, 0x20, 0x09, 76, 0, 0, 0, 0x1d, 0x21, 16,
+            0x09, 36, 0, 0, 0, 0x1d, 0x08, 12, 0, 0, 0, 0x26, 0x1d, 0x21, 20, 0x08, 0xfc, 0xff,
+            0xff, 0xff, 0x05, 0x07, 0x04, 0, 0, 0, 0,
         ];
         let q = qvm_from_parts(&code, &[], 35);
         let d = disassemble(&q).unwrap();
@@ -1976,12 +2067,8 @@ mod tests {
         // #1 LOCAL 84; #2 LOCAL 36; #3 LOAD4; #4 CONST 132; #5 ADD; #6 LOAD4;
         // #7 CVFI; #8 STORE4; #9 LEAVE 0
         let code = [
-            0x03, 0, 0, 0, 0,
-            0x09, 84, 0, 0, 0,
-            0x09, 36, 0, 0, 0, 0x1d, 0x08, 132, 0, 0, 0, 0x26, 0x1d,
-            0x3b,
-            0x20,
-            0x04, 0, 0, 0, 0,
+            0x03, 0, 0, 0, 0, 0x09, 84, 0, 0, 0, 0x09, 36, 0, 0, 0, 0x1d, 0x08, 132, 0, 0, 0, 0x26,
+            0x1d, 0x3b, 0x20, 0x04, 0, 0, 0, 0,
         ];
         let q = qvm_from_parts(&code, &[], 10);
         let d = disassemble(&q).unwrap();
@@ -1998,7 +2085,10 @@ mod tests {
             Expr::Unop("(int)", a) => assert!(matches!(*a, Expr::Float(_))),
             other => panic!("cvfi_expr(MemRef) = {other:?}, expected (int)(Float(..))"),
         }
-        let l = Expr::Local { off: 8, size: LoadSize::I4 };
+        let l = Expr::Local {
+            off: 8,
+            size: LoadSize::I4,
+        };
         match cvfi_expr(l) {
             Expr::Unop("(int)", a) => assert!(matches!(*a, Expr::Float(_))),
             other => panic!("cvfi_expr(Local) = {other:?}, expected (int)(Float(..))"),
@@ -2011,7 +2101,10 @@ mod tests {
         // FConst converts directly (float constant value -> int)
         assert_eq!(cvfi_expr(Expr::FConst(5.0)), Expr::Const(5));
         // and the rendered function keeps the CVFI expression
-        assert!(out.contains("(int)(*(<int>*)(("), "cvfi lost in output: {out}");
+        assert!(
+            out.contains("(int)(*(<int>*)(("),
+            "cvfi lost in output: {out}"
+        );
     }
 
     #[test]
@@ -2026,14 +2119,8 @@ mod tests {
         // #0 ENTER 0
         // #1 LOCAL 0; #2 LOCAL 4; #3 LOAD1; #4 SEX8; #5 CVIF; #6 STORE4; #7 LEAVE 0
         let code = [
-            0x03, 0, 0, 0, 0,
-            0x09, 0, 0, 0, 0,
-            0x09, 4, 0, 0, 0,
-            0x1b,
-            0x23,
-            0x3a,
-            0x20,
-            0x04, 0, 0, 0, 0,
+            0x03, 0, 0, 0, 0, 0x09, 0, 0, 0, 0, 0x09, 4, 0, 0, 0, 0x1b, 0x23, 0x3a, 0x20, 0x04, 0,
+            0, 0, 0,
         ];
         let q = qvm_from_parts(&code, &[], 8);
         let d = disassemble(&q).unwrap();
@@ -2053,13 +2140,8 @@ mod tests {
         // #0 ENTER 0
         // #1 LOCAL 0; #2 LOCAL 4; #3 LOAD2; #4 SEX16; #5 STORE4; #6 LEAVE 0
         let code = [
-            0x03, 0, 0, 0, 0,
-            0x09, 0, 0, 0, 0,
-            0x09, 4, 0, 0, 0,
-            0x1c,
-            0x24,
-            0x20,
-            0x04, 0, 0, 0, 0,
+            0x03, 0, 0, 0, 0, 0x09, 0, 0, 0, 0, 0x09, 4, 0, 0, 0, 0x1c, 0x24, 0x20, 0x04, 0, 0, 0,
+            0,
         ];
         let q = qvm_from_parts(&code, &[], 7);
         let d = disassemble(&q).unwrap();

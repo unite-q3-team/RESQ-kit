@@ -2,15 +2,13 @@
 //! indir_cells collection) and print them per function.
 //! Usage: probe_indircall <path.qvm> [<path.sigs>]
 
-use std::collections::HashMap;
-use qvm::{build_cfg, decompile_function, disassemble, load};
 use qvm::decompile::{Expr, LoadSize, Stmt, Terminator};
+use qvm::{build_cfg, decompile_function, disassemble, load};
+use std::collections::HashMap;
 
 #[derive(Default)]
 struct Sig {
     frame: i32,
-    args: usize,
-    ret: String,
 }
 
 fn parse_sigs(path: &str) -> HashMap<usize, Sig> {
@@ -27,21 +25,15 @@ fn parse_sigs(path: &str) -> HashMap<usize, Sig> {
                 .strip_prefix("fn[")
                 .and_then(|r| r.strip_suffix(']').and_then(|x| x.parse::<usize>().ok()))
             else {
-                continue
+                continue;
             };
             let mut frame = 0;
-            let mut args = 0usize;
-            let mut ret = "int".to_string();
             for tok in it {
                 if let Some(v) = tok.strip_prefix("frame=") {
                     frame = v.parse().unwrap_or(0);
-                } else if let Some(v) = tok.strip_prefix("args=") {
-                    args = v.parse().unwrap_or(0);
-                } else if let Some(v) = tok.strip_prefix("ret=") {
-                    ret = v.to_string();
                 }
             }
-            out.insert(idx, Sig { frame, args, ret });
+            out.insert(idx, Sig { frame });
         }
     }
     out
@@ -95,7 +87,10 @@ fn main() {
     let fns = qvm::cfg::build_functions(&d);
     let mut seen = std::collections::BTreeSet::new();
     for (fi, (start, end)) in fns.iter().enumerate() {
-        let frame = sigs.as_ref().and_then(|m| m.get(&fi)).map(|s| s.frame)
+        let frame = sigs
+            .as_ref()
+            .and_then(|m| m.get(&fi))
+            .map(|s| s.frame)
             .unwrap_or_else(|| d.insns[*start].operand.unwrap_or(0));
         if let Some(cfg) = build_cfg(&d, (*start, *end), &q.data_int32()) {
             let f = decompile_function(&d, &cfg, frame, &q.data_int32());
@@ -135,7 +130,11 @@ fn main() {
                         let geom = table_cell_geoms(addr);
                         let tag = match geom {
                             Some((base, stride)) => {
-                                let tag = if seen.contains(&(base, stride)) { " (dup)" } else { "" };
+                                let tag = if seen.contains(&(base, stride)) {
+                                    " (dup)"
+                                } else {
+                                    ""
+                                };
                                 println!(
                                     "fn[{fi}] ({start}..{end}) frame={frame} indir base=0x{base:x} stride={stride}{tag}",
                                 );

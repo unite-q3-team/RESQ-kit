@@ -13,8 +13,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use qvm::probe_common::{TrapLog, make_handler};
-use qvm::{Emu, build_functions, disassemble, load};
+use qvm::probe_common::{make_handler, TrapLog};
+use qvm::{build_functions, disassemble, load, Emu};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -101,8 +101,12 @@ fn main() {
             let (x, y) = (logs1.get(j), logs2.get(j));
             if x != y {
                 diffs += 1;
-                let xi = t1.get(j).map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns1, i)));
-                let yi = t2.get(j).map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns2, i)));
+                let xi = t1
+                    .get(j)
+                    .map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns1, i)));
+                let yi = t2
+                    .get(j)
+                    .map(|&i| format!("(insn {i}, fn[{}])", fn_of(&fns2, i)));
                 lines.push(format!(
                     "        #{j}: orig {:?} {} vs rebuilt {:?} {}",
                     x.map(|t| (t.name.clone(), t.args.clone())),
@@ -121,7 +125,11 @@ fn main() {
             lines.push(format!("        result: orig {r1} vs rebuilt {r2}"));
         }
         total += diffs;
-        let status = if diffs == 0 && e1.is_none() && e2.is_none() { "OK" } else { "MISMATCH" };
+        let status = if diffs == 0 && e1.is_none() && e2.is_none() {
+            "OK"
+        } else {
+            "MISMATCH"
+        };
         println!(
             "  {cmd:>18}: traps {:>3} vs {:>3}  result {:>6} vs {:>6}  steps {:>7} vs {:>7}  {status}{err}",
             logs1.len(),
