@@ -1,7 +1,7 @@
 //! Loading + analysis state for the GUI. Pure `qvm` calls, no UI here, so it
 //! stays unit-testable.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use qvm::{disassemble, load, load_map, trap_name, Disassembly, Opcode, Qvm};
@@ -50,6 +50,16 @@ pub struct Loaded {
     pub string_refs: BTreeMap<i32, Vec<usize>>,
     /// Syscall num -> functions performing it.
     pub trap_users: BTreeMap<u32, Vec<usize>>,
+    /// Callee fn index -> caller fn indices (direct CONST+CALL xrefs).
+    pub callers: BTreeMap<usize, Vec<usize>>,
+    /// Caller fn index -> callee fn indices (direct CONST+CALL xrefs).
+    pub callees: BTreeMap<usize, Vec<usize>>,
+    /// Function entry insn -> fn index.
+    pub entry_to_idx: HashMap<usize, usize>,
+    /// Known function display name -> fn index.
+    pub name_to_idx: HashMap<String, usize>,
+    /// All syscall names seen in this module (for syntax highlighting).
+    pub trap_names: HashSet<String>,
 }
 
 impl Loaded {
@@ -171,6 +181,50 @@ impl Loaded {
             }
         }
 
+        // Name/entry lookup tables for navigation and highlighting.
+        let mut entry_to_idx: HashMap<usize, usize> = HashMap::new();
+        let mut name_to_idx: HashMap<String, usize> = HashMap::new();
+        let mut trap_names: HashSet<String> = HashSet::new();
+        for f in &fns {
+            entry_to_idx.entry(f.entry).or_insert(f.idx);
+            if let Some(n) = &f.name {
+                name_to_idx.insert(n.clone(), f.idx);
+            }
+            for (_, tn) in &f.traps {
+                trap_names.insert(tn.clone());
+            }
+        }
+
+        // Direct call graph: `CONST <entry>; CALL` pairs.
+        let mut callers: BTreeMap<usize, std::collections::BTreeSet<usize>> = BTreeMap::new();
+        let mut callees: BTreeMap<usize, std::collections::BTreeSet<usize>> = BTreeMap::new();
+        for (idx, &(start, end)) in ranges.iter().enumerate() {
+            for w in start..end.saturating_sub(1) {
+                let ins = &d.insns[w];
+                if ins.op != Opcode::Const {
+                    continue;
+                }
+                let Some(opd) = ins.operand else { continue };
+                if opd < 0 || d.insns[w + 1].op != Opcode::Call {
+                    continue;
+                }
+                if let Some(&ti) = entry_to_idx.get(&(opd as usize)) {
+                    if ti != idx {
+                        callees.entry(idx).or_default().insert(ti);
+                        callers.entry(ti).or_default().insert(idx);
+                    }
+                }
+            }
+        }
+        let callers: BTreeMap<usize, Vec<usize>> = callers
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect()))
+            .collect();
+        let callees: BTreeMap<usize, Vec<usize>> = callees
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect()))
+            .collect();
+
         Ok(Loaded {
             path: path.to_path_buf(),
             qvm,
@@ -180,7 +234,19 @@ impl Loaded {
             lit_strings,
             string_refs,
             trap_users,
+            callers,
+            callees,
+            entry_to_idx,
+            name_to_idx,
+            trap_names,
         })
+    }
+
+    /// CFG of one function.
+    pub fn cfg(&self, idx: usize) -> Result<qvm::CFG, String> {
+        let f = self.fns.get(idx).ok_or("bad fn index")?;
+        let data = self.qvm.data_int32();
+        qvm::build_cfg(&self.d, (f.entry, f.end), &data).ok_or_else(|| "degenerate CFG".into())
     }
 
     /// Decompiled identity C for one function (uncached; the GUI caches).
