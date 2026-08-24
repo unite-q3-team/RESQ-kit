@@ -6,8 +6,16 @@ use std::path::{Path, PathBuf};
 
 use qvm::{disassemble, load, load_map, trap_name, Disassembly, Insn, Opcode, Qvm};
 
-/// Cached decompilation: text + per-line insn-range map.
-pub type DecompileCache = (std::sync::Arc<str>, std::sync::Arc<[(usize, usize)]>);
+/// Cached decompilation of one function.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Decompiled {
+    /// Identity C text (`\n`-separated lines, trailing newline).
+    pub text: std::sync::Arc<str>,
+    /// Per-C-line insn range covered by that line.
+    pub ranges: std::sync::Arc<[(usize, usize)]>,
+    /// Block label insn -> C line index (goto navigation targets).
+    pub labels: std::sync::Arc<HashMap<usize, usize>>,
+}
 
 /// Raw bytecode bytes of one instruction, hex formatted (`0C FF FF FF FF`).
 pub fn insn_bytes(ins: &Insn) -> String {
@@ -133,6 +141,20 @@ impl FnInfo {
 
     pub fn display_name(&self) -> &str {
         self.name.as_deref().unwrap_or("unnamed")
+    }
+
+    /// Rebuild the lowercased filter blob from current metadata.
+    pub fn rebuild_search(&mut self) {
+        let mut s = self.name.clone().unwrap_or_default();
+        s.push_str(&format!(" fn{} {} ", self.idx, self.entry));
+        for (n, tn) in &self.traps {
+            s.push_str(&format!("{n} {tn} "));
+        }
+        for st in &self.strings {
+            s.push_str(st);
+            s.push(' ');
+        }
+        self.search = s.to_lowercase();
     }
 }
 
@@ -267,24 +289,17 @@ impl Loaded {
             }
 
             let name = qvm.name_for_fn(start).map(str::to_string);
-            let mut search = name.clone().unwrap_or_default();
-            search.push_str(&format!(" fn{idx} {start} "));
-            for (n, tn) in &traps {
-                search.push_str(&format!("{n} {tn} "));
-            }
-            for s in &strings {
-                search.push_str(s);
-                search.push(' ');
-            }
-            fns.push(FnInfo {
+            let mut info = FnInfo {
                 idx,
                 entry: start,
                 end,
                 name,
                 traps,
                 strings,
-                search: search.to_lowercase(),
-            });
+                search: String::new(),
+            };
+            info.rebuild_search();
+            fns.push(info);
         }
 
         // Literal-segment string table (address order).
@@ -297,7 +312,7 @@ impl Loaded {
                 Some(s) => {
                     let step = s.len() as i32 + 1;
                     lit_strings.push((a, s));
-                    a += step.max(1);
+                    a += step;
                 }
                 None => a += 1,
             }
@@ -479,8 +494,9 @@ impl Loaded {
     }
 
     /// Decompiled identity C for one function (uncached; the GUI caches).
-    /// Returns the text plus a per-line insn-range map for pane sync.
-    pub fn decompile(&self, idx: usize) -> Result<DecompileCache, String> {
+    /// Returns the text, a per-line insn-range map for pane sync, and the
+    /// label -> C-line index for goto navigation.
+    pub fn decompile(&self, idx: usize) -> Result<Decompiled, String> {
         let f = self.fns.get(idx).ok_or("bad fn index")?;
         let data = self.qvm.data_int32();
         let cfg = qvm::build_cfg(&self.d, (f.entry, f.end), &data).ok_or("degenerate CFG")?;
@@ -493,8 +509,21 @@ impl Loaded {
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
-        let map: Vec<(usize, usize)> = lines.into_iter().map(|(_, r)| r).collect();
-        Ok((text.into(), map.into()))
+        let labels: HashMap<usize, usize> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (t, _))| {
+                let t = t.trim();
+                let n = t.strip_prefix('L')?.strip_suffix(':')?;
+                n.parse::<usize>().ok().map(|n| (n, i))
+            })
+            .collect();
+        let ranges: Vec<(usize, usize)> = lines.into_iter().map(|(_, r)| r).collect();
+        Ok(Decompiled {
+            text: text.into(),
+            ranges: ranges.into(),
+            labels: labels.into(),
+        })
     }
 
     /// Disasm pane slice for one function (instruction-index range).
@@ -504,6 +533,7 @@ impl Loaded {
     }
 
     /// Persist renames as a q3asm-compatible `.map` next to the QVM.
+    /// The previous file is kept as `.map.bak` before overwriting.
     pub fn save_map(&self) -> Result<PathBuf, String> {
         let mut named: Vec<(usize, &str)> = self
             .fns
@@ -512,6 +542,10 @@ impl Loaded {
             .collect();
         named.sort_by_key(|&(e, _)| e);
         let out = self.path.with_extension("map");
+        if out.is_file() {
+            let bak = self.path.with_extension("map.bak");
+            std::fs::copy(&out, &bak).map_err(|e| format!("backup {}: {e}", bak.display()))?;
+        }
         let mut text = String::from("# resq-gui renames (q3asm -m compatible)\n");
         for (entry, name) in named {
             text.push_str(&format!("0 {entry:x} {name}\n"));
@@ -533,17 +567,41 @@ impl Loaded {
             f.name = Some(trimmed.to_string());
             self.qvm.names.insert(f.entry, trimmed.to_string());
         }
-        f.search = {
-            let mut s = f.name.clone().unwrap_or_default();
-            s.push_str(&format!(" fn{} {} ", f.idx, f.entry));
-            for (n, tn) in &f.traps {
-                s.push_str(&format!("{n} {tn} "));
-            }
-            for st in &f.strings {
-                s.push_str(st);
-                s.push(' ');
-            }
-            s.to_lowercase()
+        f.rebuild_search();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebuild_search_covers_name_traps_strings() {
+        let mut f = FnInfo {
+            idx: 7,
+            entry: 100,
+            end: 200,
+            name: Some("G_InitGame".into()),
+            traps: vec![(5, "trap_SendServerCommand".into())],
+            strings: vec!["mapchange".into()],
+            search: String::new(),
         };
+        f.rebuild_search();
+        assert!(f.search.contains("g_initgame"));
+        assert!(f.search.contains("sendservercommand"));
+        assert!(f.search.contains("mapchange"));
+        assert!(f.search.contains("fn7 100 "));
+
+        f.name = None;
+        f.rebuild_search();
+        assert!(!f.search.contains("g_initgame"));
+    }
+
+    #[test]
+    fn escape_keeps_control_chars_visible() {
+        assert_eq!(escape("a\nb\"c\\d"), "a\\nb\\\"c\\\\d");
+        assert_eq!(escape("\u{1}"), "\\x01");
+        // Non-ASCII passes through untouched.
+        assert_eq!(escape("привет"), "привет");
     }
 }

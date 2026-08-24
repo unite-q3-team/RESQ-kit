@@ -8,6 +8,7 @@ description = "Interactive QVM analyzer GUI for the RESQ kit"
 [dependencies]
 qvm = { path = "../qvm" }
 eframe = "0.29"
+rfd = "0.15"
 
 [profile.release]
 opt-level = 2

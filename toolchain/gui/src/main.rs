@@ -10,6 +10,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
+            .with_min_inner_size([960.0, 620.0])
             .with_title("RESQ kit - QVM analyzer"),
         ..Default::default()
     };

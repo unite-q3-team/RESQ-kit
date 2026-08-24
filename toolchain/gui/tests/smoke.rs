@@ -50,7 +50,7 @@ fn open_rename_save_reload() {
 
     // decompile works on the trivial function
     let c = l.decompile(0).expect("decompile");
-    assert!(!c.0.is_empty());
+    assert!(!c.text.is_empty());
 
     // rename -> save map -> reload picks the name up
     l.rename(0, "Smoke_Main");
@@ -71,7 +71,15 @@ fn open_rename_save_reload() {
     let text = std::fs::read_to_string(&map_path).unwrap();
     assert_eq!(text.lines().count(), 1, "only the comment line remains");
 
+    // overwriting an existing .map keeps a backup next to it
+    let bak_path = path.with_extension("map.bak");
+    assert!(
+        bak_path.is_file(),
+        "previous .map backed up before overwrite"
+    );
+
     std::fs::remove_file(&path).ok();
     std::fs::remove_file(&map_path).ok();
+    std::fs::remove_file(&bak_path).ok();
     std::fs::remove_dir(&dir).ok();
 }
