@@ -106,6 +106,7 @@ pub struct App {
     loaded: Option<Loaded>,
     path_edit: String,
     filter: String,
+    strings_filter: String,
     selected: Option<usize>,
     c_cache: HashMap<usize, Arc<str>>,
     rename_buf: String,
@@ -118,8 +119,9 @@ pub struct App {
     graph_pan: egui::Vec2,
     /// Fit the call graph to the window on request.
     graph_fit: bool,
-    /// CFG canvas pan (fixed zoom).
+    /// CFG canvas pan / zoom.
     cfg_pan: egui::Vec2,
+    cfg_zoom: f32,
     cfg_fit: bool,
     /// User-dragged node offsets (world space).
     img_offsets: HashMap<usize, egui::Vec2>,
@@ -154,6 +156,7 @@ impl App {
             loaded: None,
             path_edit: initial.unwrap_or_default(),
             filter: String::new(),
+            strings_filter: String::new(),
             selected: None,
             c_cache: HashMap::new(),
             rename_buf: String::new(),
@@ -165,6 +168,7 @@ impl App {
             graph_pan: egui::Vec2::ZERO,
             graph_fit: true,
             cfg_pan: egui::Vec2::ZERO,
+            cfg_zoom: 1.0,
             cfg_fit: true,
             img_offsets: HashMap::new(),
             cfg_offsets: HashMap::new(),
@@ -212,6 +216,8 @@ impl App {
                 self.cfg_offsets.clear();
                 self.img_drag = None;
                 self.cfg_drag = None;
+                self.cfg_zoom = 1.0;
+                self.cfg_fit = true;
                 self.hex_view = None;
                 self.sync_to_d = None;
                 self.sync_to_c = None;
@@ -687,13 +693,29 @@ impl App {
 
                 match self.tab {
                     BottomTab::Strings => {
-                        let n = l.lit_strings.len();
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.strings_filter)
+                                .hint_text("filter strings...")
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        let needle = self.strings_filter.to_lowercase();
+                        let rows: Vec<(i32, &String)> = l
+                            .lit_strings
+                            .iter()
+                            .filter(|(addr, s)| {
+                                needle.is_empty()
+                                    || s.to_lowercase().contains(&needle)
+                                    || format!("{addr}").contains(&needle)
+                            })
+                            .map(|(a, s)| (*a, s))
+                            .collect();
+                        ui.monospace(format!("{}/{} strings", rows.len(), l.lit_strings.len()));
                         egui::ScrollArea::vertical()
                             .id_salt("strings")
                             .auto_shrink([false, false])
-                            .show_rows(ui, mono_h, n, |ui, rows| {
-                                for r in rows {
-                                    let (addr, s) = &l.lit_strings[r];
+                            .show_rows(ui, mono_h, rows.len(), |ui, range| {
+                                for r in range {
+                                    let (addr, s) = &rows[r];
                                     let users = l.string_refs.get(addr).map_or(0, Vec::len);
                                     let txt = format!("@{addr}  \"{}\"  ({users} refs)", escape(s));
                                     let resp = ui.selectable_label(false, &txt);
@@ -732,7 +754,7 @@ impl App {
                                         });
                                         if ui.button("Copy text").clicked() {
                                             ui.close_menu();
-                                            ui.output_mut(|o| o.copied_text = s.clone());
+                                            ui.output_mut(|o| o.copied_text = s.to_string());
                                         }
                                     });
                                     if resp.clicked() {
@@ -1029,6 +1051,7 @@ impl App {
                         sel,
                         &cfg,
                         &mut self.cfg_pan,
+                        &mut self.cfg_zoom,
                         &mut self.cfg_fit,
                         &mut self.cfg_offsets,
                         &mut self.cfg_drag,
@@ -1485,7 +1508,7 @@ fn image_graph_pane(
     let cg = &l.callgraph;
     let n = l.fns.len();
     let node_h = |zi: f32| {
-        if zi >= 0.75 {
+        if zi >= 0.60 {
             H + PREV_LINES as f32 * LINE_H
         } else {
             H
@@ -1517,7 +1540,7 @@ fn image_graph_pane(
     if let Some(fi) = *focus {
         *focus = None;
         if fi < n {
-            *zoom = (*zoom).clamp(0.55, 1.2);
+            *zoom = 1.0; // readable by default: preview text visible
             let c = pos(offsets, fi) + egui::vec2(W / 2.0, node_h(*zoom) / 2.0);
             *pan = rect.size() / 2.0 - c * *zoom;
         }
@@ -1618,7 +1641,6 @@ fn image_graph_pane(
     }
 
     // Nodes, culled.
-    let mut hit: Option<usize> = None;
     for i in 0..n {
         let w0 = pos(offsets, i);
         let s0 = to_screen(*pan, *zoom, w0);
@@ -1626,12 +1648,6 @@ fn image_graph_pane(
         let srect = egui::Rect::from_min_size(s0, egui::vec2(W * *zoom, nh * *zoom));
         if !clip.intersects(srect) {
             continue;
-        }
-        if let Some(pw) = pointer_world {
-            let wrect = egui::Rect::from_min_size(w0.to_pos2(), egui::vec2(W, nh));
-            if wrect.contains(pw.to_pos2()) {
-                hit = Some(i);
-            }
         }
         let named = l.fns[i].name.is_some();
         let root = cg.depth[i] == 0;
@@ -1651,7 +1667,8 @@ fn image_graph_pane(
             Color32::from_rgb(70, 78, 90)
         };
         p.rect_stroke(srect, 2.0, egui::Stroke::new(1.0, border));
-        if *zoom >= 0.30 {
+        let z = *zoom;
+        if z >= 0.30 {
             let label = l.fns[i].display_name();
             let label = if label.chars().count() > 22 {
                 format!("{}…", label.chars().take(21).collect::<String>())
@@ -1660,14 +1677,14 @@ fn image_graph_pane(
             };
             let color = if named { C_FN } else { C_DIM };
             p.text(
-                srect.left_top() + egui::vec2(4.0, 3.0),
+                srect.left_top() + egui::vec2(4.0, 3.0) * z,
                 egui::Align2::LEFT_TOP,
                 label,
-                egui::FontId::monospace(10.0),
+                egui::FontId::monospace(10.0 * z),
                 color,
             );
         }
-        if *zoom >= 0.55 {
+        if z >= 0.55 {
             let info = format!(
                 "{} insns | calls {} | callers {}",
                 l.fns[i].len(),
@@ -1675,17 +1692,17 @@ fn image_graph_pane(
                 l.callers.get(&i).map_or(0, Vec::len)
             );
             p.text(
-                srect.left_top() + egui::vec2(4.0, 16.0),
+                srect.left_top() + egui::vec2(4.0, 16.0) * z,
                 egui::Align2::LEFT_TOP,
                 info,
-                egui::FontId::monospace(9.0),
+                egui::FontId::monospace(9.0 * z),
                 C_DIM,
             );
         }
-        if *zoom >= 0.75 {
+        if z >= 0.60 {
             // Function content preview: hex + disasm, IDA style.
             let f = &l.fns[i];
-            let mut y = srect.top() + 30.0;
+            let mut y = srect.top() + 30.0 * z;
             for ii in f.entry..(f.entry + PREV_LINES).min(f.end) {
                 let line = l.lines.get(ii).map_or("", String::as_str);
                 let text = format!("{:<15} {}", insn_bytes(&l.d.insns[ii]), line);
@@ -1695,50 +1712,49 @@ fn image_graph_pane(
                     text
                 };
                 p.text(
-                    egui::Pos2::new(srect.left() + 4.0, y),
+                    egui::Pos2::new(srect.left() + 4.0 * z, y),
                     egui::Align2::LEFT_TOP,
                     text,
-                    egui::FontId::monospace(9.5),
+                    egui::FontId::monospace(9.5 * z),
                     C_PLAIN,
                 );
-                y += LINE_H;
+                y += LINE_H * z;
             }
         }
-    }
 
-    // Hover tooltip + click handling.
-    if let Some(h) = hit {
-        let f = &l.fns[h];
+        // Per-node interaction: stable id => no flickering tooltip/menu.
+        let f = &l.fns[i];
+        let nresp = ui.interact(srect, egui::Id::new(("cgnode", i)), Sense::click());
         let tip = format!(
-            "fn[{h}] {}\ninsns {}, callers {}, calls {}\nLMB select, dbl-LMB open, RMB menu",
+            "fn[{i}] {}\ninsns {}, callers {}, calls {}",
             f.display_name(),
             f.len(),
-            l.callers.get(&h).map_or(0, Vec::len),
-            l.callees.get(&h).map_or(0, Vec::len)
+            l.callers.get(&i).map_or(0, Vec::len),
+            l.callees.get(&i).map_or(0, Vec::len)
         );
-        let resp = resp.on_hover_text(tip);
-        if resp.clicked() {
-            *jump = Some(h);
+        let nresp = nresp.on_hover_text(tip);
+        if nresp.clicked() {
+            *jump = Some(i);
         }
-        if resp.double_clicked() {
-            *jump = Some(h);
+        if nresp.double_clicked() {
+            *jump = Some(i);
             *open_code = true;
         }
-        resp.context_menu(|ui| {
-            ui.label(format!("fn[{h}] {}", f.display_name()));
+        nresp.context_menu(|ui| {
+            ui.label(format!("fn[{i}] {}", f.display_name()));
             if ui.button("Open in Code view").clicked() {
                 ui.close_menu();
-                *jump = Some(h);
+                *jump = Some(i);
                 *open_code = true;
             }
             if ui.button("Show CFG").clicked() {
                 ui.close_menu();
-                *jump = Some(h);
+                *jump = Some(i);
                 *mode = GraphMode::Cfg;
             }
             if ui.button("Center on this node").clicked() {
                 ui.close_menu();
-                *focus = Some(h);
+                *focus = Some(i);
             }
             if ui.button("Copy name").clicked() {
                 ui.close_menu();
@@ -1759,6 +1775,7 @@ fn cfg_canvas(
     sel: usize,
     cfg: &qvm::CFG,
     pan: &mut egui::Vec2,
+    zoom: &mut f32,
     fit: &mut bool,
     offsets: &mut HashMap<(usize, usize), egui::Vec2>,
     drag: &mut Option<usize>,
@@ -1836,20 +1853,30 @@ fn cfg_canvas(
     let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     let p = ui.painter_at(rect);
 
-    // Fit: center content.
+    // Fit: zoom so the whole CFG is visible, top-left anchored.
     if *fit {
         *fit = false;
-        *pan = rect.size() / 2.0 - egui::Vec2::new(total_w / 2.0, total_h / 2.0);
+        *zoom = (rect.width() / total_w)
+            .min(rect.height() / total_h)
+            .clamp(0.15, 1.5);
+        *pan = egui::Vec2::new(8.0, 8.0);
     }
 
-    // Wheel = vertical pan.
-    let wheel = ui.input(|i| i.raw_scroll_delta);
-    if resp.hovered() {
-        *pan += egui::Vec2::new(wheel.x, wheel.y);
+    // Wheel = zoom around the pointer.
+    if let Some(pointer) = resp.hover_pos() {
+        let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
+        if scroll_y != 0.0 {
+            let k = (scroll_y * 0.0015).clamp(-0.25, 0.25);
+            let old = *zoom;
+            *zoom = (*zoom * (1.0 + k)).clamp(0.15, 2.5);
+            let rel = pointer - rect.min - *pan;
+            let world = rel / old;
+            *pan = pointer - rect.min - world * *zoom;
+        }
     }
 
     // Hit test.
-    let pointer_world = resp.hover_pos().map(|h| h - rect.min - *pan);
+    let pointer_world = resp.hover_pos().map(|h| (h - rect.min - *pan) / *zoom);
     let hit_at = |pw: Option<egui::Vec2>| -> Option<usize> {
         let pw = pw?;
         for (bi, h) in heights.iter().enumerate() {
@@ -1868,7 +1895,7 @@ fn cfg_canvas(
     if let Some(dn) = *drag {
         if resp.dragged() {
             let e = offsets.entry((sel, dn)).or_default();
-            *e += resp.drag_delta();
+            *e += resp.drag_delta() / *zoom;
         }
     } else if resp.dragged() {
         *pan += resp.drag_delta();
@@ -1877,7 +1904,7 @@ fn cfg_canvas(
         *drag = None;
     }
 
-    let to_screen = |pan: egui::Vec2, w: egui::Vec2| rect.min + pan + w;
+    let to_screen = |pan: egui::Vec2, zoom: f32, w: egui::Vec2| rect.min + pan + w * zoom;
 
     // Edge label: branch op name for taken edges, "ft" for fallthrough.
     let edge_label = |bi: usize, s: usize| -> String {
@@ -1906,10 +1933,11 @@ fn cfg_canvas(
             }
             let a = to_screen(
                 *pan,
+                *zoom,
                 pos(offsets, bi) + egui::Vec2::new(W, heights[bi] / 2.0),
             );
-            let bpt = to_screen(*pan, pos(offsets, s));
-            let bpt = egui::Pos2::new(bpt.x, bpt.y + heights[s] / 2.0);
+            let bpt = to_screen(*pan, *zoom, pos(offsets, s));
+            let bpt = egui::Pos2::new(bpt.x, bpt.y + heights[s] / 2.0 * *zoom);
             let bound = egui::Rect::from_min_max(a.min(bpt), a.max(bpt));
             if !rect.intersects(bound) {
                 continue;
@@ -1932,15 +1960,15 @@ fn cfg_canvas(
                 ],
                 closed: false,
                 fill: Color32::TRANSPARENT,
-                stroke: egui::Stroke::new(1.2, color).into(),
+                stroke: egui::Stroke::new((1.2 * *zoom).max(0.5), color).into(),
             };
             p.add(shape);
             let dir = if bpt.x > a.x { -1.0 } else { 1.0 };
-            let tip = egui::Pos2::new(bpt.x + 5.0 * dir, bpt.y);
+            let tip = egui::Pos2::new(bpt.x + 5.0 * dir * *zoom, bpt.y);
             let pts = vec![
                 tip,
-                egui::Pos2::new(bpt.x - 3.0 * dir, bpt.y - 3.5),
-                egui::Pos2::new(bpt.x - 3.0 * dir, bpt.y + 3.5),
+                egui::Pos2::new(bpt.x - 3.0 * dir * *zoom, bpt.y - 3.5 * *zoom),
+                egui::Pos2::new(bpt.x - 3.0 * dir * *zoom, bpt.y + 3.5 * *zoom),
             ];
             p.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
             // Condition label at the curve midpoint.
@@ -1948,7 +1976,7 @@ fn cfg_canvas(
                 (a.x + 3.0 * mid_x + 3.0 * mid_x + bpt.x) / 8.0,
                 (a.y + 3.0 * a.y + 3.0 * bpt.y + bpt.y) / 8.0,
             );
-            let galley = p.layout_no_wrap(lbl.clone(), egui::FontId::monospace(9.5), color);
+            let galley = p.layout_no_wrap(lbl.clone(), egui::FontId::monospace(9.5 * *zoom), color);
             let gsize = galley.size();
             let bg = egui::Rect::from_center_size(mid, gsize + egui::vec2(6.0, 2.0));
             p.rect_filled(bg, 2.0, Color32::from_rgb(24, 26, 30));
@@ -1958,24 +1986,25 @@ fn cfg_canvas(
 
     // Nodes: full disasm with hex bytes, draggable.
     for (bi, b) in cfg.blocks.iter().enumerate() {
-        let s0 = to_screen(*pan, pos(offsets, bi));
-        let r = egui::Rect::from_min_size(s0, egui::vec2(W, heights[bi]));
+        let s0 = to_screen(*pan, *zoom, pos(offsets, bi));
+        let r = egui::Rect::from_min_size(s0, egui::vec2(W * *zoom, heights[bi] * *zoom));
         if !rect.intersects(r) {
             continue;
         }
         p.rect_filled(r, 3.0, Color32::from_rgb(38, 42, 50));
         p.rect_stroke(r, 3.0, egui::Stroke::new(1.0, C_LBL));
-        let mut y = r.top() + 3.0;
+        let z = *zoom;
+        let mut y = r.top() + 3.0 * z;
         for (li, line) in block_lines[bi].iter().enumerate() {
             let color = if li == 0 { C_LBL } else { C_PLAIN };
             p.text(
-                egui::Pos2::new(r.left() + 6.0, y),
+                egui::Pos2::new(r.left() + 6.0 * z, y),
                 egui::Align2::LEFT_TOP,
                 line,
-                egui::FontId::monospace(10.0),
+                egui::FontId::monospace(10.0 * z),
                 color,
             );
-            y += LINE_H;
+            y += LINE_H * z;
         }
 
         let node_resp = ui.interact(r, egui::Id::new(("gnode", sel, bi)), Sense::click());
