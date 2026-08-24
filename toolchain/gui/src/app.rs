@@ -104,6 +104,8 @@ struct Sink<'a> {
     hexreq: &'a mut Option<HexReq>,
     /// Open the Xrefs tab for this fn index.
     xref_fn: &'a mut Option<usize>,
+    /// Insn to flash-highlight after scrolling (goto / C-line click).
+    flash: &'a mut Option<usize>,
 }
 
 pub struct App {
@@ -142,6 +144,8 @@ pub struct App {
     hover_fn: Option<usize>,
     /// Hovered Identity C line -> insn range tinted in Disassembly.
     c_hover_range: Option<(usize, usize)>,
+    /// Recently jumped-to insn: flash-highlight with fade-out.
+    flash: Option<(usize, std::time::Instant)>,
     /// Measured world-space widths of call-graph nodes (content-sized).
     img_w: HashMap<usize, f32>,
     img_colw: Vec<f32>,
@@ -189,6 +193,7 @@ impl App {
             scroll_to: None,
             hover_fn: None,
             c_hover_range: None,
+            flash: None,
             img_w: HashMap::new(),
             img_colw: Vec::new(),
             hist: Vec::new(),
@@ -1083,8 +1088,10 @@ impl App {
             let mut open_code = false;
             let hover_fn_prev = self.hover_fn;
             let c_range_prev = self.c_hover_range;
+            let flash_prev = self.flash;
             let mut new_hover_fn: Option<usize> = None;
             let mut new_c_range: Option<(usize, usize)> = None;
+            let mut flash_loc: Option<usize> = None;
             let scroll_req: Option<usize> = self.scroll_to.take();
             let sync_to_d = self.sync_to_d.take();
             let sync_to_c = self.sync_to_c.take();
@@ -1113,7 +1120,22 @@ impl App {
                     let d_out = sa.show_rows(&mut cols[0], mono_h, range.len(), |ui, rows| {
                         for i in rows {
                             let ii = range.start + i;
-                            let tint = if let Some((rs, re)) = c_range_prev {
+                            // Fade flash of the recently jumped-to instruction.
+                            let flash_tint = flash_prev.and_then(|(t, at)| {
+                                if ii != t {
+                                    return None;
+                                }
+                                let k = at.elapsed().as_secs_f32() / 0.9;
+                                if k >= 1.0 {
+                                    None
+                                } else {
+                                    let a = ((1.0 - k) * 150.0) as u8;
+                                    Some(Color32::from_rgba_unmultiplied(97, 175, 239, a))
+                                }
+                            });
+                            let tint = if flash_tint.is_some() {
+                                flash_tint
+                            } else if let Some((rs, re)) = c_range_prev {
                                 if ii >= rs && ii < re {
                                     Some(TINT_ENTRY)
                                 } else {
@@ -1131,6 +1153,7 @@ impl App {
                                 hover_fn: &mut new_hover_fn,
                                 hexreq: &mut hex_loc,
                                 xref_fn: &mut xref_loc,
+                                flash: &mut flash_loc,
                             };
                             render_row(ui, l, &segs, &mut sink);
                             // Instruction help tooltip on hover.
@@ -1172,6 +1195,7 @@ impl App {
                                 hover_fn: &mut new_hover_fn,
                                 hexreq: &mut hex_loc,
                                 xref_fn: &mut xref_loc,
+                                flash: &mut flash_loc,
                             };
                             render_row(ui, l, &segs, &mut sink);
                             // Hover/click a C line -> highlight its instructions.
@@ -1191,6 +1215,7 @@ impl App {
                             if r.clicked() {
                                 if let Some((rs, _)) = span {
                                     pending_scroll = Some(rs);
+                                    flash_loc = Some(rs);
                                 }
                             }
                         }
@@ -1253,6 +1278,14 @@ impl App {
             self.hover_fn = new_hover_fn;
             self.c_hover_range = new_c_range;
             self.scroll_to = pending_scroll;
+            // Flash: keep the new target, expire the old one.
+            self.flash = match flash_loc {
+                Some(t) => Some((t, std::time::Instant::now())),
+                None => flash_prev.filter(|(_, at)| at.elapsed().as_millis() < 900),
+            };
+            if self.flash.is_some() {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+            }
             if hex_loc.is_some() {
                 self.hex_view = hex_loc;
             }
@@ -1571,6 +1604,7 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                     let r = tok_label(ui, t, C_LBL);
                     if r.clicked() {
                         *sink.scroll = Some(*n);
+                        *sink.flash = Some(*n);
                     }
                 }
                 Seg::StrTok(t, addr) => {

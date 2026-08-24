@@ -1142,6 +1142,8 @@ mod tests {
             frame: 4,
             blocks,
             read_slots: std::collections::BTreeSet::new(),
+            arity: 0,
+            returns: false,
         }
     }
 

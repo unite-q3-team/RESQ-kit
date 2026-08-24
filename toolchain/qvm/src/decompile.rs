@@ -143,6 +143,10 @@ pub struct Function {
     pub blocks: Vec<LoweredBlock>,
     /// Slots read across blocks (used to decide which slot assigns to keep).
     pub read_slots: std::collections::BTreeSet<usize>,
+    /// Argument count inferred from ARG marshaling instructions.
+    pub arity: usize,
+    /// True when at least one block returns a value.
+    pub returns: bool,
 }
 
 /// Net opstack effect of an opcode (items pushed minus popped).
@@ -749,12 +753,26 @@ fn decompile_function_raw(d: &Disassembly, cfg: &CFG, frame: i32, data: &[i32]) 
         }
     }
 
+    // Signature inference: arity from ARG marshaling (offsets are 4, 8, ...),
+    // return type from presence of value-returning terminators.
+    let arity = (cfg.start..cfg.end)
+        .filter_map(|i| d.at(i))
+        .filter(|ins| ins.op == Opcode::Arg)
+        .filter_map(|ins| ins.operand)
+        .max()
+        .map_or(0, |m| m as usize / 4 + 1);
+    let returns = blocks_out
+        .iter()
+        .any(|b| matches!(b.term, Terminator::Return(Some(_))));
+
     Function {
         start: cfg.start,
         end: cfg.end,
         frame,
         blocks: blocks_out,
         read_slots: lower.reads,
+        arity,
+        returns,
     }
 }
 
@@ -1707,7 +1725,18 @@ pub fn fmt_function_lines(f: &Function, q: &Qvm) -> Vec<FmtLine> {
         format!("// function @ insn {}..{} frame {}", f.start, f.end, f.frame),
         whole,
     );
-    out("void fn() {".to_string(), whole);
+    // Signature: real name when known, arity from ARG marshaling. The QVM
+    // ABI passes everything as 4-byte ints, so `int` args is the honest bet.
+    let name = q
+        .name_for_fn(f.start)
+        .map_or_else(|| format!("fn_{}", f.start), |s| s.to_string());
+    let args = if f.arity == 0 {
+        "void".to_string()
+    } else {
+        (0..f.arity).map(|i| format!("int a{i}")).collect::<Vec<_>>().join(", ")
+    };
+    let ret = if f.returns { "int" } else { "void" };
+    out(format!("{ret} {name}({args}) {{"), whole);
     for (bi, b) in f.blocks.iter().enumerate() {
         if !reach[bi] {
             continue;
