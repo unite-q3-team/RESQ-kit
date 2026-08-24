@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: windows-latest
+            platform: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: toolchain/qvm
+
+      - run: cargo build --release
+        working-directory: toolchain/qvm
+
+      - name: Package (linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir "resq-kit-${{ matrix.platform }}"
+          cp toolchain/qvm/target/release/probe_* \
+             toolchain/qvm/target/release/vmdbg_diff \
+             "resq-kit-${{ matrix.platform }}/"
+          tar czf "resq-kit-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz" \
+            "resq-kit-${{ matrix.platform }}"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "resq-kit-${{ matrix.platform }}"
+          New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item toolchain\qvm\target\release\probe_*.exe $dir
+          Copy-Item toolchain\qvm\target\release\vmdbg_diff.exe $dir
+          Compress-Archive -Path $dir `
+            -DestinationPath "resq-kit-${{ github.ref_name }}-${{ matrix.platform }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: resq-kit-${{ matrix.platform }}
+          path: resq-kit-${{ github.ref_name }}-*
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: resq-kit-*
+          generate_release_notes: true

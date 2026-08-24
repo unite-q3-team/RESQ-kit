@@ -3,6 +3,7 @@
 
 # RESQ kit — погрузитесь в любой Quake 3 QVM. Анализируйте, декомпилируйте, пересобирайте.
 
+![CI](https://github.com/unite-q3-team/RESQ-kit/actions/workflows/ci.yml/badge.svg)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![rust](https://img.shields.io/badge/made%20with-Rust-dea584?logo=rust)
