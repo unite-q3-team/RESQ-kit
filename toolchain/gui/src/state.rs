@@ -20,6 +20,23 @@ pub fn insn_bytes(ins: &Insn) -> String {
         .join(" ")
 }
 
+/// Escape control characters so strings stay on one displayed line.
+pub fn escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u8)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Per-function metadata collected at load time (mirrors `probe_inventory`).
 pub struct FnInfo {
     pub idx: usize,
@@ -118,7 +135,7 @@ impl Loaded {
             if ins.op == Opcode::Const {
                 if let Some(opd) = ins.operand {
                     if let Some(s) = qvm.string_at(opd) {
-                        line.push_str(&format!("  ; \"{s}\""));
+                        line.push_str(&format!("  ; \"{}\"", escape(&s)));
                     }
                     if let Some(next) = d.insns.get(i + 1) {
                         if next.op == Opcode::Call && opd < 0 {
@@ -344,6 +361,22 @@ impl Loaded {
             .first()
             .copied()
             .unwrap_or(self.fns.len().saturating_sub(1))
+    }
+
+    /// One byte of VM memory (data | lit | zeroed bss) at a masked address.
+    pub fn mem_byte(&self, addr: i32) -> u8 {
+        if addr < 0 {
+            return 0;
+        }
+        let a = addr as usize;
+        let dl = self.qvm.data_length as usize;
+        if a < dl {
+            self.qvm.data.get(a).copied().unwrap_or(0)
+        } else if a < dl + self.qvm.lit_length as usize {
+            self.qvm.lit.get(a - dl).copied().unwrap_or(0)
+        } else {
+            0 // bss
+        }
     }
 
     /// Decompiled identity C for one function (uncached; the GUI caches).

@@ -1,15 +1,15 @@
-//! egui frontend: function list | disasm | identity C | CFG graph.
+//! egui frontend: function list | disasm | identity C | call graph | CFG.
 //!
-//! UI closures only READ from `Loaded`; every action (jump / scroll / hover)
-//! is collected into locals and applied after the panels are built. That
-//! keeps borrows disjoint and egui happy.
+//! UI closures only READ from `Loaded`; every action (jump / scroll / hover /
+//! hex dump / tab switch) is collected into locals and applied after the
+//! panels are built. That keeps borrows disjoint and egui happy.
 
 use std::collections::{HashMap, HashSet};
 
 use eframe::egui;
 use egui::{Color32, RichText, Sense, TextWrapMode};
 
-use crate::state::Loaded;
+use crate::state::{escape, insn_bytes, Loaded};
 
 #[derive(Clone, Copy, Default, PartialEq)]
 enum BottomTab {
@@ -32,6 +32,14 @@ enum GraphMode {
     Image,
     /// CFG of the selected function.
     Cfg,
+}
+
+/// Request for the floating memory hex-dump window.
+#[derive(Clone)]
+struct HexReq {
+    title: String,
+    addr: i32,
+    len: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -63,10 +71,14 @@ const KEYWORDS: &[&str] = &[
 enum Seg {
     /// Colored static text.
     P(String, Color32),
-    /// Known function name -> fn index (clickable).
+    /// Known function name -> fn index (clickable, context menu).
     FnTok(String, usize),
     /// Basic-block label `L<n>` -> insn index (clickable, scrolls disasm).
     LblTok(String, usize),
+    /// Quoted string literal with its VM address (context menu).
+    StrTok(String, i32),
+    /// Numeric CONST operand: potential data address (context menu).
+    NumTok(String),
 }
 
 /// Shared immutable view over `Loaded` maps used by the tokenizers.
@@ -74,6 +86,16 @@ struct Tok<'a> {
     names: &'a HashMap<String, usize>,
     traps: &'a HashSet<String>,
     entries: &'a HashMap<usize, usize>,
+}
+
+/// Actions collected while rendering one pane.
+struct Sink<'a> {
+    jump: &'a mut Option<usize>,
+    scroll: &'a mut Option<usize>,
+    hover_fn: &'a mut Option<usize>,
+    hexreq: &'a mut Option<HexReq>,
+    /// Open the Xrefs tab for this fn index.
+    xref_fn: &'a mut Option<usize>,
 }
 
 pub struct App {
@@ -90,18 +112,34 @@ pub struct App {
     /// Call-graph view transform (world -> screen: `scr = pan + world * zoom`).
     graph_zoom: f32,
     graph_pan: egui::Vec2,
-    /// Fit the call graph to the window on first show after load.
+    /// Fit the call graph to the window on request.
     graph_fit: bool,
-    /// Pending scroll request for the disasm pane (insn index).
-    scroll_to: Option<usize>,
-    /// Cross-pane highlight state, kept between frames.
-    hover_fn: Option<usize>,
-    hover_tok: Option<String>,
-    /// Navigation history (back / forward), like IDA's Alt+Left/Right.
-    hist: Vec<usize>,
-    hist_fwd: Vec<usize>,
+    /// CFG canvas pan (fixed zoom).
+    cfg_pan: egui::Vec2,
+    cfg_fit: bool,
+    /// User-dragged node offsets (world space).
+    img_offsets: HashMap<usize, egui::Vec2>,
+    cfg_offsets: HashMap<(usize, usize), egui::Vec2>,
+    /// Node currently being dragged.
+    img_drag: Option<usize>,
+    cfg_drag: Option<usize>,
     /// Pending "center call graph on this function" request.
     graph_focus: Option<usize>,
+    /// Pending scroll request for the disasm pane (insn index).
+    scroll_to: Option<usize>,
+    /// Cross-pane highlight (C token hover -> disasm function range tint).
+    hover_fn: Option<usize>,
+    /// Navigation history (back / forward).
+    hist: Vec<usize>,
+    hist_fwd: Vec<usize>,
+    /// Scroll sync between Disasm and Identity C.
+    sync_scroll: bool,
+    sync_to_d: Option<f32>,
+    sync_to_c: Option<f32>,
+    prev_d: f32,
+    prev_c: f32,
+    /// Floating memory hex-dump window.
+    hex_view: Option<HexReq>,
 }
 
 impl App {
@@ -113,19 +151,30 @@ impl App {
             selected: None,
             c_cache: HashMap::new(),
             rename_buf: String::new(),
-            status: "open a .qvm (button, path field, or drag & drop)".into(),
+            status: "open a .qvm (File menu, path field, or drag & drop)".into(),
             tab: BottomTab::Strings,
             center: CenterTab::Code,
             graph_mode: GraphMode::Image,
             graph_zoom: 1.0,
             graph_pan: egui::Vec2::ZERO,
             graph_fit: true,
+            cfg_pan: egui::Vec2::ZERO,
+            cfg_fit: true,
+            img_offsets: HashMap::new(),
+            cfg_offsets: HashMap::new(),
+            img_drag: None,
+            cfg_drag: None,
+            graph_focus: None,
             scroll_to: None,
             hover_fn: None,
-            hover_tok: None,
             hist: Vec::new(),
             hist_fwd: Vec::new(),
-            graph_focus: None,
+            sync_scroll: false,
+            sync_to_d: None,
+            sync_to_c: None,
+            prev_d: 0.0,
+            prev_c: 0.0,
+            hex_view: None,
         };
         if !app.path_edit.is_empty() {
             app.load_path(&app.path_edit.clone());
@@ -148,11 +197,17 @@ impl App {
                 self.c_cache.clear();
                 self.scroll_to = l.fns.first().map(|f| f.entry);
                 self.hover_fn = None;
-                self.hover_tok = None;
-                self.graph_fit = true;
+                self.graph_fit = false;
                 self.hist.clear();
                 self.hist_fwd.clear();
                 self.graph_focus = Some(l.entry_fn());
+                self.img_offsets.clear();
+                self.cfg_offsets.clear();
+                self.img_drag = None;
+                self.cfg_drag = None;
+                self.hex_view = None;
+                self.sync_to_d = None;
+                self.sync_to_c = None;
                 self.loaded = Some(l);
             }
             Err(e) => self.status = e,
@@ -214,6 +269,7 @@ impl eframe::App for App {
         }
 
         // Arrow-key navigation in the function list (no history entries).
+        let kb_free = !ctx.wants_keyboard_input();
         let (down, up) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::ArrowDown),
@@ -235,7 +291,6 @@ impl eframe::App for App {
         }
 
         // Global hotkeys (ignored while a text field has keyboard focus).
-        let kb_free = !ctx.wants_keyboard_input();
         let (back, fwd, reload, save) = ctx.input(|i| {
             (
                 kb_free && i.key_pressed(egui::Key::Backspace),
@@ -269,7 +324,48 @@ impl eframe::App for App {
         if let Some(j) = jump {
             self.jump_to(j, true);
         }
+
+        // Floating memory hex-dump window.
+        if let Some(hv) = self.hex_view.clone() {
+            if let Some(l) = &self.loaded {
+                let mut open = true;
+                egui::Window::new(format!("Memory — {}", hv.title))
+                    .open(&mut open)
+                    .default_width(560.0)
+                    .default_height(380.0)
+                    .show(ctx, |ui| hex_rows(ui, l, &hv));
+                if !open {
+                    self.hex_view = None;
+                }
+            }
+        }
     }
+}
+
+/// Hex dump rows: `ADDR  xx xx .. xx  |ascii|` (16 bytes per row).
+fn hex_rows(ui: &mut egui::Ui, l: &Loaded, hv: &HexReq) {
+    ui.monospace(format!("address {:#x}, {} bytes", hv.addr, hv.len));
+    let rows = hv.len.div_ceil(16);
+    let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show_rows(ui, row_h, rows, |ui, range| {
+            for r in range {
+                let base = hv.addr + (r * 16) as i32;
+                let mut hex = String::new();
+                let mut ascii = String::new();
+                for k in 0..16 {
+                    let b = l.mem_byte(base + k);
+                    hex.push_str(&format!("{b:02X} "));
+                    ascii.push(if (0x20..0x7f).contains(&b) {
+                        b as char
+                    } else {
+                        '.'
+                    });
+                }
+                ui.monospace(format!("{base:08X}  {hex} |{ascii}|"));
+            }
+        });
 }
 
 impl App {
@@ -307,12 +403,12 @@ impl App {
         let Some(sel) = self.selected else { return };
         match l.decompile(sel) {
             Ok(text) => {
-                let mut name = l
+                let raw = l
                     .fns
                     .get(sel)
                     .and_then(|f| f.name.clone())
                     .unwrap_or_else(|| format!("fn{sel}"));
-                name = name
+                let name: String = raw
                     .chars()
                     .map(|c| {
                         if c.is_ascii_alphanumeric() || c == '_' {
@@ -361,7 +457,6 @@ impl App {
     }
 
     fn top_bar(&mut self, ctx: &egui::Context) {
-        let jump: Option<usize> = None;
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 // ---- File ------------------------------------------------
@@ -371,12 +466,12 @@ impl App {
                         let p = self.path_edit.clone();
                         self.load_path(&p);
                     }
-                    if ui.button("Reload (F5)").clicked() {
+                    if ui.button("Reload").on_hover_text("F5").clicked() {
                         ui.close_menu();
                         let p = self.path_edit.clone();
                         self.load_path(&p);
                     }
-                    if ui.button("Save .map (Ctrl+S)").clicked() {
+                    if ui.button("Save .map").on_hover_text("Ctrl+S").clicked() {
                         ui.close_menu();
                         self.save_map_action();
                     }
@@ -389,11 +484,15 @@ impl App {
 
                 // ---- View ------------------------------------------------
                 ui.menu_button("View", |ui| {
-                    if ui.button("Back (Backspace / Alt+Left)").clicked() {
+                    if ui
+                        .button("Back")
+                        .on_hover_text("Backspace / Alt+Left")
+                        .clicked()
+                    {
                         ui.close_menu();
                         self.go_back();
                     }
-                    if ui.button("Forward (Alt+Right)").clicked() {
+                    if ui.button("Forward").on_hover_text("Alt+Right").clicked() {
                         ui.close_menu();
                         self.go_forward();
                     }
@@ -413,7 +512,11 @@ impl App {
                         self.graph_mode = GraphMode::Cfg;
                     }
                     ui.separator();
-                    if ui.button("Graph: center on vmMain (Home)").clicked() {
+                    if ui
+                        .button("Graph: center on vmMain")
+                        .on_hover_text("Home")
+                        .clicked()
+                    {
                         ui.close_menu();
                         self.center = CenterTab::Graph;
                         self.graph_mode = GraphMode::Image;
@@ -425,11 +528,11 @@ impl App {
                         ui.close_menu();
                         self.graph_fit = true;
                     }
-                    if ui.button("Graph: zoom in (+)").clicked() {
+                    if ui.button("Graph: zoom in").on_hover_text("+").clicked() {
                         ui.close_menu();
                         self.graph_zoom = (self.graph_zoom * 1.3).clamp(0.03, 2.5);
                     }
-                    if ui.button("Graph: zoom out (-)").clicked() {
+                    if ui.button("Graph: zoom out").on_hover_text("-").clicked() {
                         ui.close_menu();
                         self.graph_zoom = (self.graph_zoom / 1.3).clamp(0.03, 2.5);
                     }
@@ -451,7 +554,7 @@ impl App {
                     }
                 });
 
-                // ---- path field + status --------------------------------
+                // ---- path field ------------------------------------------
                 let edit = egui::TextEdit::singleline(&mut self.path_edit)
                     .desired_width(ui.available_width() - 16.0)
                     .font(egui::TextStyle::Monospace);
@@ -465,7 +568,8 @@ impl App {
                 let kb_free = !ctx.wants_keyboard_input();
                 let home = kb_free && ctx.input(|i| i.key_pressed(egui::Key::Home));
                 if ui
-                    .add_enabled(self.loaded.is_some(), egui::Button::new("vmMain (Home)"))
+                    .add_enabled(self.loaded.is_some(), egui::Button::new("vmMain"))
+                    .on_hover_text("Home — center the call graph on the entry function")
                     .clicked()
                     || home
                 {
@@ -476,29 +580,26 @@ impl App {
                     }
                 }
                 if ui
-                    .add_enabled(
-                        !self.hist.is_empty(),
-                        egui::Button::new("< Back (Backspace)"),
-                    )
+                    .add_enabled(!self.hist.is_empty(), egui::Button::new("<"))
+                    .on_hover_text("Back (Backspace / Alt+Left)")
                     .clicked()
                 {
                     self.go_back();
                 }
                 if ui
-                    .add_enabled(
-                        !self.hist_fwd.is_empty(),
-                        egui::Button::new("Forward (Alt+Right) >"),
-                    )
+                    .add_enabled(!self.hist_fwd.is_empty(), egui::Button::new(">"))
+                    .on_hover_text("Forward (Alt+Right)")
                     .clicked()
                 {
                     self.go_forward();
                 }
+                ui.separator();
+                ui.add(egui::Checkbox::new(&mut self.sync_scroll, "Sync scroll"))
+                    .on_hover_text("Scroll Disassembly and Identity C together (by fraction)");
+                ui.separator();
                 ui.colored_label(egui::Color32::LIGHT_BLUE, &self.status);
             });
         });
-        if let Some(j) = jump {
-            self.jump_to(j, true);
-        }
     }
 
     fn function_list(&mut self, ctx: &egui::Context, jump: &mut Option<usize>) {
@@ -570,8 +671,47 @@ impl App {
                                 for r in rows {
                                     let (addr, s) = &l.lit_strings[r];
                                     let users = l.string_refs.get(addr).map_or(0, Vec::len);
-                                    let txt = format!("@{addr}  \"{s}\"  ({users} refs)");
-                                    if ui.selectable_label(false, txt).clicked() {
+                                    let txt = format!("@{addr}  \"{}\"  ({users} refs)", escape(s));
+                                    let resp = ui.selectable_label(false, &txt);
+                                    resp.context_menu(|ui| {
+                                        ui.label(format!("@{addr}"));
+                                        if ui.button("Hex dump string").clicked() {
+                                            ui.close_menu();
+                                            self.hex_view = Some(HexReq {
+                                                title: format!("string @ {addr}"),
+                                                addr: *addr,
+                                                len: s.len().max(1),
+                                            });
+                                        }
+                                        ui.menu_button("Xrefs to string", |ui| {
+                                            match l.string_refs.get(addr) {
+                                                Some(v) if !v.is_empty() => {
+                                                    for fi in v.iter().take(30) {
+                                                        let f = &l.fns[*fi];
+                                                        if ui
+                                                            .button(format!(
+                                                                "fn[{}] {}",
+                                                                fi,
+                                                                f.display_name()
+                                                            ))
+                                                            .clicked()
+                                                        {
+                                                            ui.close_menu();
+                                                            *jump = Some(*fi);
+                                                        }
+                                                    }
+                                                }
+                                                _ => {
+                                                    ui.label("(none)");
+                                                }
+                                            }
+                                        });
+                                        if ui.button("Copy text").clicked() {
+                                            ui.close_menu();
+                                            ui.output_mut(|o| o.copied_text = s.clone());
+                                        }
+                                    });
+                                    if resp.clicked() {
                                         if let Some(v) = l.string_refs.get(addr) {
                                             if let Some(&first) = v.first() {
                                                 *jump = Some(first);
@@ -679,7 +819,7 @@ impl App {
             let Some(sel) = self.selected else { return };
             let entry = self.loaded.as_ref().map_or(0, |x| x.fns[sel].entry);
 
-            // Rename row above the panes + center-tab selector.
+            // Header row: rename + center tabs + graph helpers.
             ui.horizontal(|ui| {
                 ui.monospace(format!("fn[{sel}] @ insn {entry}"));
                 let resp = ui.add_sized(
@@ -708,6 +848,42 @@ impl App {
                 {
                     self.center = CenterTab::Graph;
                 }
+                if self.center == CenterTab::Graph {
+                    ui.separator();
+                    if ui
+                        .selectable_label(self.graph_mode == GraphMode::Image, "Image")
+                        .clicked()
+                    {
+                        self.graph_mode = GraphMode::Image;
+                    }
+                    if ui
+                        .selectable_label(self.graph_mode == GraphMode::Cfg, "Cfg")
+                        .clicked()
+                    {
+                        self.graph_mode = GraphMode::Cfg;
+                    }
+                    if ui.button("Fit").clicked() {
+                        match self.graph_mode {
+                            GraphMode::Image => self.graph_fit = true,
+                            GraphMode::Cfg => self.cfg_fit = true,
+                        }
+                    }
+                    if ui.button("Reset layout").clicked() {
+                        match self.graph_mode {
+                            GraphMode::Image => self.img_offsets.clear(),
+                            GraphMode::Cfg => self.cfg_offsets.clear(),
+                        }
+                    }
+                    ui.separator();
+                    match self.graph_mode {
+                        GraphMode::Image => ui.monospace(
+                            "drag canvas = pan, wheel = zoom, drag node = move, RMB = menu, dbl-click = open",
+                        ),
+                        GraphMode::Cfg => ui.monospace(
+                            "drag canvas = pan, wheel = vscroll, drag node = move, RMB = menu",
+                        ),
+                    };
+                }
             });
 
             ui.separator();
@@ -734,20 +910,27 @@ impl App {
                 entries: &l.entry_to_idx,
             };
             let fn_ranges: Vec<(usize, usize)> = l.fns.iter().map(|f| (f.entry, f.end)).collect();
-            let cfg_res = match self.center {
-                CenterTab::Graph => Some(l.cfg(sel)),
-                CenterTab::Code => None,
+            let cfg_res = match (self.center, self.graph_mode) {
+                (CenterTab::Graph, GraphMode::Cfg) => Some(l.cfg(sel)),
+                _ => None,
             };
 
             // Locals collected inside the panes; applied after building.
             let mut jump_loc: Option<usize> = None;
+            let mut hex_loc: Option<HexReq> = None;
+            let mut xref_loc: Option<usize> = None;
             let mut open_code = false;
-            let scroll_req: Option<usize> = self.scroll_to.take();
-            let mut pending_scroll: Option<usize> = None;
             let hover_fn_prev = self.hover_fn;
-            let hover_tok_prev = self.hover_tok.clone();
             let mut new_hover_fn: Option<usize> = None;
-            let mut new_hover_tok: Option<String> = None;
+            let scroll_req: Option<usize> = self.scroll_to.take();
+            let sync_to_d = self.sync_to_d.take();
+            let sync_to_c = self.sync_to_c.take();
+            let prev_d = self.prev_d;
+            let prev_c = self.prev_c;
+            let sync = self.sync_scroll;
+            let mut d_now = 0.0f32;
+            let mut c_now = 0.0f32;
+            let mut pending_scroll: Option<usize> = None;
 
             match self.center {
                 CenterTab::Code => ui.columns(2, |cols| {
@@ -761,7 +944,10 @@ impl App {
                             sa = sa.vertical_scroll_offset((t - range.start) as f32 * mono_h);
                         }
                     }
-                    sa.show_rows(&mut cols[0], mono_h, range.len(), |ui, rows| {
+                    if let Some(y) = sync_to_d {
+                        sa = sa.vertical_scroll_offset(y);
+                    }
+                    let d_out = sa.show_rows(&mut cols[0], mono_h, range.len(), |ui, rows| {
                         for i in rows {
                             let ii = range.start + i;
                             paint_row_bg(
@@ -770,72 +956,60 @@ impl App {
                                 cross_tint_insn(ii, hover_fn_prev, &fn_ranges),
                             );
                             let segs = d_segments(&l.lines[ii], &tok);
-                            render_segs_disasm(
-                                ui,
-                                &segs,
-                                &mut jump_loc,
-                                &mut pending_scroll,
-                                &mut new_hover_tok,
-                            );
+                            let mut sink = Sink {
+                                jump: &mut jump_loc,
+                                scroll: &mut pending_scroll,
+                                hover_fn: &mut new_hover_fn,
+                                hexreq: &mut hex_loc,
+                                xref_fn: &mut xref_loc,
+                            };
+                            render_row(ui, l, &segs, &mut sink);
                         }
                     });
+                    d_now = d_out.state.offset.y;
 
                     // ---- right: decompiled C -------------------------------
                     cols[1].heading("Identity C");
                     let c_rows: Vec<&str> = text.lines().collect();
-                    egui::ScrollArea::vertical()
+                    let mut sac = egui::ScrollArea::vertical()
                         .id_salt("decomp")
-                        .auto_shrink([false, false])
-                        .show_rows(&mut cols[1], mono_h, c_rows.len(), |ui, rows| {
-                            for i in rows {
-                                let line = c_rows[i];
-                                let tint = hover_tok_prev
-                                    .as_ref()
-                                    .and_then(|t| token_in_line(line, t).then_some(TINT_HOVER));
-                                paint_row_bg(ui, mono_h, tint);
-                                let segs = c_segments(line, &tok);
-                                render_segs_c(
-                                    ui,
-                                    &segs,
-                                    &mut jump_loc,
-                                    &mut pending_scroll,
-                                    &mut new_hover_fn,
-                                );
-                            }
-                        });
-                }),
-                CenterTab::Graph => {
-                    ui.horizontal(|ui| {
-                        ui.label("Graph:");
-                        if ui
-                            .selectable_label(self.graph_mode == GraphMode::Image, "Image")
-                            .clicked()
-                        {
-                            self.graph_mode = GraphMode::Image;
-                        }
-                        if ui
-                            .selectable_label(
-                                self.graph_mode == GraphMode::Cfg,
-                                format!("Cfg fn[{sel}]"),
-                            )
-                            .clicked()
-                        {
-                            self.graph_mode = GraphMode::Cfg;
-                        }
-                        ui.separator();
-                        if self.graph_mode == GraphMode::Image {
-                            ui.monospace(format!(
-                                "whole image: {} functions, {} roots — drag to pan, scroll to zoom, click to select, double-click to open",
-                                l.fns.len(),
-                                l.callgraph.roots.len()
-                            ));
-                        } else {
-                            ui.monospace("click a block to scroll Disassembly");
+                        .auto_shrink([false, false]);
+                    if let Some(y) = sync_to_c {
+                        sac = sac.vertical_scroll_offset(y);
+                    }
+                    let c_out = sac.show_rows(&mut cols[1], mono_h, c_rows.len(), |ui, rows| {
+                        for i in rows {
+                            paint_row_bg(ui, mono_h, None);
+                            let segs = c_segments(c_rows[i], &tok);
+                            let mut sink = Sink {
+                                jump: &mut jump_loc,
+                                scroll: &mut pending_scroll,
+                                hover_fn: &mut new_hover_fn,
+                                hexreq: &mut hex_loc,
+                                xref_fn: &mut xref_loc,
+                            };
+                            render_row(ui, l, &segs, &mut sink);
                         }
                     });
-                    ui.separator();
-                    match self.graph_mode {
-                        GraphMode::Image => image_graph_pane(
+                    c_now = c_out.state.offset.y;
+                }),
+                CenterTab::Graph => match cfg_res {
+                    Some(Ok(cfg)) => cfg_canvas(
+                        ui,
+                        l,
+                        sel,
+                        &cfg,
+                        &mut self.cfg_pan,
+                        &mut self.cfg_fit,
+                        &mut self.cfg_offsets,
+                        &mut self.cfg_drag,
+                        &mut pending_scroll,
+                    ),
+                    Some(Err(e)) => {
+                        ui.colored_label(Color32::LIGHT_RED, format!("CFG error: {e}"));
+                    }
+                    None => {
+                        image_graph_pane(
                             ui,
                             l,
                             sel,
@@ -843,27 +1017,39 @@ impl App {
                             &mut self.graph_pan,
                             &mut self.graph_fit,
                             &mut self.graph_focus,
-                            &mut pending_scroll,
+                            &mut self.img_offsets,
+                            &mut self.img_drag,
+                            &mut self.graph_mode,
                             &mut jump_loc,
                             &mut open_code,
-                        ),
-                        GraphMode::Cfg => match cfg_res {
-                            Some(Ok(cfg)) => {
-                                graph_pane(ui, l, sel, &cfg, &mut pending_scroll, &mut jump_loc)
-                            }
-                            Some(Err(e)) => {
-                                ui.colored_label(Color32::LIGHT_RED, format!("CFG error: {e}"));
-                            }
-                            None => unreachable!("graph tab implies cfg"),
-                        },
+                        );
                     }
+                },
+            }
+
+            // Fraction-based scroll sync (one frame lag, damped).
+            if self.center == CenterTab::Code && sync {
+                let d_h = range.len() as f32 * mono_h;
+                let c_h = text.lines().count() as f32 * mono_h;
+                if (d_now - prev_d).abs() > 0.5 {
+                    self.sync_to_c = Some(d_now / d_h.max(1.0) * c_h);
+                } else if (c_now - prev_c).abs() > 0.5 {
+                    self.sync_to_d = Some(c_now / c_h.max(1.0) * d_h);
                 }
             }
+            self.prev_d = d_now;
+            self.prev_c = c_now;
 
             // Apply collected actions.
             self.hover_fn = new_hover_fn;
-            self.hover_tok = new_hover_tok;
             self.scroll_to = pending_scroll;
+            if hex_loc.is_some() {
+                self.hex_view = hex_loc;
+            }
+            if let Some(xf) = xref_loc {
+                self.tab = BottomTab::Xrefs;
+                self.jump_to(xf, false);
+            }
             if open_code {
                 self.center = CenterTab::Code;
             }
@@ -892,16 +1078,6 @@ fn cross_tint_insn(
     } else {
         None
     }
-}
-
-fn token_in_line(line: &str, tok: &str) -> bool {
-    // Word-boundary aware containment so "printf" does not match "sprintf".
-    line.match_indices(tok).any(|(p, _)| {
-        let before = line[..p].chars().next_back();
-        let after = line[p + tok.len()..].chars().next();
-        let ok = |c: Option<char>| c.is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
-        ok(before) && ok(after)
-    })
 }
 
 fn paint_row_bg(ui: &mut egui::Ui, row_h: f32, tint: Option<Color32>) {
@@ -935,6 +1111,8 @@ fn d_segments(line: &str, tok: &Tok) -> Vec<Seg> {
         None => (line, None),
     };
 
+    let mut cur_op = String::new();
+    let mut const_val: Option<i32> = None;
     for w in code.split_whitespace() {
         if w.starts_with("->#") {
             out.push(Seg::P(w.to_string(), C_TGT));
@@ -943,9 +1121,15 @@ fn d_segments(line: &str, tok: &Tok) -> Vec<Seg> {
         } else if w.chars().all(|c| c.is_ascii_uppercase() || c == '_')
             && w.chars().any(char::is_alphabetic)
         {
+            cur_op = w.to_string();
             out.push(Seg::P(w.to_string(), C_LBL)); // opcode mnemonic
         } else if is_num(w) {
-            out.push(Seg::P(w.to_string(), C_NUM));
+            if cur_op == "CONST" {
+                const_val = w.parse().ok();
+                out.push(Seg::NumTok(w.to_string()));
+            } else {
+                out.push(Seg::P(w.to_string(), C_NUM));
+            }
         } else {
             out.push(Seg::P(w.to_string(), C_PLAIN));
         }
@@ -963,23 +1147,19 @@ fn d_segments(line: &str, tok: &Tok) -> Vec<Seg> {
             if !pre.is_empty() {
                 out.push(Seg::P(pre.to_string(), C_CMT));
             }
-            match rest[1..].find('"') {
-                Some(b) => {
-                    out.push(Seg::P(rest[..b + 2].to_string(), C_STR));
-                    out.push(Seg::P(rest[b + 2..].to_string(), C_CMT));
-                }
-                None => out.push(Seg::P(rest.to_string(), C_STR)),
+            let quoted = match rest[1..].find('"') {
+                Some(b) => &rest[..b + 2],
+                None => rest,
+            };
+            out.push(Seg::StrTok(quoted.to_string(), const_val.unwrap_or(0)));
+            let tail = &rest[quoted.len()..];
+            if !tail.is_empty() {
+                out.push(Seg::P(tail.to_string(), C_CMT));
             }
         } else {
             for w in inner.split_whitespace() {
                 if w == "syscall" || w == "call" {
                     out.push(Seg::P(format!("{w} "), C_CMT));
-                } else if let Some(digits) = w.strip_suffix(',') {
-                    if digits.parse::<u32>().is_ok() || digits.parse::<i64>().is_ok() {
-                        out.push(Seg::P(format!("{digits} "), C_NUM));
-                    } else {
-                        out.push(Seg::P(format!("{w} "), C_CMT));
-                    }
                 } else if is_num(w) {
                     out.push(Seg::P(format!("{w} "), C_NUM));
                 } else if let Some(target) = w.strip_prefix("fn@") {
@@ -1002,7 +1182,7 @@ fn d_segments(line: &str, tok: &Tok) -> Vec<Seg> {
             }
         }
     }
-    merge_plain(out)
+    out
 }
 
 fn classify_ident(w: &str, tok: &Tok, out: &mut Vec<Seg>) {
@@ -1080,8 +1260,7 @@ fn c_segments(line: &str, tok: &Tok) -> Vec<Seg> {
                     break;
                 }
             }
-            let w = &t[st..i];
-            classify_ident(w, tok, &mut out);
+            classify_ident(&t[st..i], tok, &mut out);
         } else if c.is_ascii_digit() {
             let st = i;
             i += 1;
@@ -1099,11 +1278,11 @@ fn c_segments(line: &str, tok: &Tok) -> Vec<Seg> {
             i += 1;
         }
     }
-    merge_plain(out)
+    out
 }
 
 // ---------------------------------------------------------------------------
-// Segment rendering
+// Segment rendering (with context menus)
 // ---------------------------------------------------------------------------
 
 fn plain_label(ui: &mut egui::Ui, txt: &str, color: Color32) {
@@ -1137,88 +1316,121 @@ fn merge_plain(mut segs: Vec<Seg>) -> Vec<Seg> {
 }
 
 /// Render one source line as a single horizontal run of tight tokens.
-fn render_row(ui: &mut egui::Ui, segs: &[Seg], on_tok: &mut impl FnMut(&egui::Response, &Seg)) {
+fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
+    let segs = merge_plain(segs.to_vec());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         for s in segs {
             match s {
-                Seg::P(t, c) => plain_label(ui, t, *c),
-                Seg::LblTok(t, _) => {
-                    let r = tok_label(ui, t, C_LBL);
-                    on_tok(&r, s);
+                Seg::P(t, c) => plain_label(ui, &t, c),
+                Seg::FnTok(t, idx) => {
+                    let r = tok_label(ui, &t, C_FN);
+                    if r.hovered() {
+                        *sink.hover_fn = Some(idx);
+                    }
+                    if r.double_clicked() {
+                        *sink.jump = Some(idx);
+                    }
+                    r.context_menu(|ui| {
+                        let f = &l.fns[idx];
+                        let addr = l.d.insns[f.entry].addr;
+                        ui.label(format!(
+                            "fn[{idx}] {} @ insn {} ({addr:#x})",
+                            f.display_name(),
+                            f.entry
+                        ));
+                        if ui.button("Go to function").clicked() {
+                            ui.close_menu();
+                            *sink.jump = Some(idx);
+                        }
+                        if ui
+                            .button(format!("Xrefs to {}", f.display_name()))
+                            .clicked()
+                        {
+                            ui.close_menu();
+                            *sink.xref_fn = Some(idx);
+                        }
+                        if ui.button("Copy name").clicked() {
+                            ui.close_menu();
+                            ui.output_mut(|o| {
+                                o.copied_text = f.display_name().to_string();
+                            });
+                        }
+                    });
                 }
-                Seg::FnTok(t, _) => {
-                    let r = tok_label(ui, t, C_FN);
-                    on_tok(&r, s);
+                Seg::LblTok(t, n) => {
+                    let r = tok_label(ui, &t, C_LBL);
+                    if r.clicked() {
+                        *sink.scroll = Some(n);
+                    }
+                }
+                Seg::StrTok(t, addr) => {
+                    let r = tok_label(ui, &t, C_STR);
+                    r.context_menu(|ui| {
+                        ui.label(format!("@{addr}"));
+                        if ui.button("Hex dump string").clicked() {
+                            ui.close_menu();
+                            *sink.hexreq = Some(HexReq {
+                                title: format!("string @ {addr}"),
+                                addr,
+                                len: t.len().max(1),
+                            });
+                        }
+                        ui.menu_button("Xrefs to string", |ui| match l.string_refs.get(&addr) {
+                            Some(v) if !v.is_empty() => {
+                                for fi in v.iter().take(30) {
+                                    let f = &l.fns[*fi];
+                                    if ui
+                                        .button(format!("fn[{fi}] {}", f.display_name()))
+                                        .clicked()
+                                    {
+                                        ui.close_menu();
+                                        *sink.jump = Some(*fi);
+                                    }
+                                }
+                            }
+                            _ => {
+                                ui.label("(none)");
+                            }
+                        });
+                        if ui.button("Copy text").clicked() {
+                            ui.close_menu();
+                            ui.output_mut(|o| o.copied_text = t.clone());
+                        }
+                    });
+                }
+                Seg::NumTok(t) => {
+                    let val = t.parse::<i32>().ok();
+                    let r = tok_label(ui, &t, C_NUM);
+                    r.context_menu(|ui| {
+                        ui.label(format!("operand {t}"));
+                        if let Some(v) = val {
+                            if ui.button(format!("Hex dump memory at {v:#x}")).clicked() {
+                                ui.close_menu();
+                                *sink.hexreq = Some(HexReq {
+                                    title: format!("{v:#x}"),
+                                    addr: v,
+                                    len: 128,
+                                });
+                            }
+                        }
+                        if ui.button("Copy value").clicked() {
+                            ui.close_menu();
+                            ui.output_mut(|o| o.copied_text = t.clone());
+                        }
+                    });
                 }
             }
         }
     });
-}
-
-fn render_segs_disasm(
-    ui: &mut egui::Ui,
-    segs: &[Seg],
-    jump: &mut Option<usize>,
-    scroll: &mut Option<usize>,
-    hover_tok: &mut Option<String>,
-) {
-    let mut jump_out = None;
-    render_row(ui, segs, &mut |r, s| {
-        if let Seg::FnTok(t, idx) = s {
-            if r.hovered() {
-                *hover_tok = Some(t.clone());
-            }
-            if r.double_clicked() {
-                jump_out = Some(*idx);
-            }
-        }
-    });
-    if jump_out.is_some() {
-        *jump = jump_out;
-    }
-    let _ = scroll;
-}
-
-fn render_segs_c(
-    ui: &mut egui::Ui,
-    segs: &[Seg],
-    jump: &mut Option<usize>,
-    scroll: &mut Option<usize>,
-    hover_fn: &mut Option<usize>,
-) {
-    let mut jump_out = None;
-    let mut scroll_out = None;
-    render_row(ui, segs, &mut |r, s| match s {
-        Seg::FnTok(_, idx) => {
-            if r.hovered() {
-                *hover_fn = Some(*idx);
-            }
-            if r.double_clicked() {
-                jump_out = Some(*idx);
-            }
-        }
-        Seg::LblTok(_, n) => {
-            if r.clicked() {
-                scroll_out = Some(*n);
-            }
-        }
-        Seg::P(_, _) => {}
-    });
-    if jump_out.is_some() {
-        *jump = jump_out;
-    }
-    if scroll_out.is_some() {
-        *scroll = scroll_out;
-    }
 }
 
 // ---------------------------------------------------------------------------
 // Whole-image call graph
 // ---------------------------------------------------------------------------
 
-/// Whole-image call graph: pan (drag), zoom (scroll), click to select,
-/// double-click to open the function in the Code view.
+/// Whole-image call graph: pan (drag), zoom (scroll), draggable nodes,
+/// RMB context menu, double-click opens the function.
 #[allow(clippy::too_many_arguments)]
 fn image_graph_pane(
     ui: &mut egui::Ui,
@@ -1228,7 +1440,9 @@ fn image_graph_pane(
     pan: &mut egui::Vec2,
     fit: &mut bool,
     focus: &mut Option<usize>,
-    scroll: &mut Option<usize>,
+    offsets: &mut HashMap<usize, egui::Vec2>,
+    drag: &mut Option<usize>,
+    mode: &mut GraphMode,
     jump: &mut Option<usize>,
     open_code: &mut bool,
 ) {
@@ -1237,35 +1451,46 @@ fn image_graph_pane(
     const GX: f32 = 44.0;
     const GY: f32 = 12.0;
     const M: f32 = 12.0;
+    const PREV_LINES: usize = 6;
+    const LINE_H: f32 = 12.0;
 
     let cg = &l.callgraph;
     let n = l.fns.len();
-    // World-space node positions.
-    let pos = |i: usize| -> egui::Vec2 {
+    let node_h = |zi: f32| {
+        if zi >= 0.75 {
+            H + PREV_LINES as f32 * LINE_H
+        } else {
+            H
+        }
+    };
+    let base_pos = |i: usize| -> egui::Vec2 {
         egui::Vec2::new(
             M + cg.depth[i] as f32 * (W + GX),
             M + cg.row[i] as f32 * (H + GY),
         )
     };
+    let pos = |offs: &HashMap<usize, egui::Vec2>, i: usize| -> egui::Vec2 {
+        base_pos(i) + offs.get(&i).copied().unwrap_or_default()
+    };
     let total_w = M + (cg.max_depth + 1) as f32 * (W + GX);
     let total_h = M + cg.col_len.iter().copied().max().unwrap_or(1) as f32 * (H + GY);
 
     let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+    let p = ui.painter_at(rect);
 
-    // Initial fit: zoom so the whole image is visible.
+    // Initial fit / focus.
     if *fit {
         *fit = false;
-        let fit_w = rect.width() / total_w;
-        let fit_h = rect.height() / total_h;
-        *zoom = fit_w.min(fit_h).clamp(0.03, 1.0);
+        *zoom = (rect.width() / total_w)
+            .min(rect.height() / total_h)
+            .clamp(0.03, 1.0);
         *pan = egui::Vec2::new(8.0, 8.0);
     }
-    // Center on the requested function (vmMain on start, Home button later).
     if let Some(fi) = *focus {
         *focus = None;
         if fi < n {
             *zoom = (*zoom).clamp(0.55, 1.2);
-            let c = pos(fi) + egui::vec2(W / 2.0, H / 2.0);
+            let c = pos(offsets, fi) + egui::vec2(W / 2.0, node_h(*zoom) / 2.0);
             *pan = rect.size() / 2.0 - c * *zoom;
         }
     }
@@ -1282,27 +1507,56 @@ fn image_graph_pane(
             *pan = pointer - rect.min - world * *zoom;
         }
     }
-    // Pan by drag.
-    if resp.dragged() {
-        *pan += resp.drag_delta();
+
+    let to_screen = |pan: egui::Vec2, zoom: f32, w: egui::Vec2| rect.min + pan + w * zoom;
+    let clip = rect;
+
+    // Hit test (world space).
+    let pointer_world = resp.hover_pos().map(|h| (h - rect.min - *pan) / *zoom);
+    let hit_at = |pw: Option<egui::Vec2>| -> Option<usize> {
+        let pw = pw?;
+        for i in 0..n {
+            let r =
+                egui::Rect::from_min_size(pos(offsets, i).to_pos2(), egui::vec2(W, node_h(*zoom)));
+            if r.contains(pw.to_pos2()) {
+                return Some(i);
+            }
+        }
+        None
+    };
+
+    // Drag handling: node if a drag started on one, canvas pan otherwise.
+    if resp.drag_started() {
+        *drag = hit_at(pointer_world);
     }
-
-    let to_screen = |w: egui::Vec2| rect.min + *pan + w * *zoom;
-    let clip = ui.clip_rect();
-
-    let p = ui.painter();
+    let mut panned = false;
+    if let Some(dn) = *drag {
+        if resp.dragged() {
+            let e = offsets.entry(dn).or_default();
+            *e += resp.drag_delta() / *zoom;
+        }
+    } else if resp.dragged() {
+        *pan += resp.drag_delta();
+        panned = true;
+    }
+    if resp.drag_stopped() {
+        *drag = None;
+    }
+    let _ = panned;
 
     // Edges (caller -> callee), culled.
     let edge_color = Color32::from_rgba_unmultiplied(110, 118, 128, 140);
     if *zoom >= 0.08 {
         for (caller, callees_list) in &l.callees {
-            let a = to_screen(pos(*caller) + egui::vec2(W, H / 2.0));
+            let a = to_screen(
+                *pan,
+                *zoom,
+                pos(offsets, *caller) + egui::vec2(W, node_h(*zoom) / 2.0),
+            );
             for &t in callees_list {
-                let b = to_screen(pos(t));
-                let b = egui::Pos2::new(b.x, b.y + H / 2.0);
-                let lo = a.min(b);
-                let hi = a.max(b);
-                let bound = egui::Rect::from_min_max(lo, hi);
+                let b = to_screen(*pan, *zoom, pos(offsets, t));
+                let b = egui::Pos2::new(b.x, b.y + node_h(*zoom) / 2.0);
+                let bound = egui::Rect::from_min_max(a.min(b), a.max(b));
                 if !clip.intersects(bound) {
                     continue;
                 }
@@ -1319,22 +1573,34 @@ fn image_graph_pane(
                     stroke: egui::Stroke::new(1.0, edge_color).into(),
                 };
                 p.add(shape);
+                let dir = if b.x > a.x { -1.0 } else { 1.0 };
+                let tip = egui::Pos2::new(b.x + 5.0 * dir, b.y);
+                let pts = vec![
+                    tip,
+                    egui::Pos2::new(b.x - 3.0 * dir, b.y - 3.5),
+                    egui::Pos2::new(b.x - 3.0 * dir, b.y + 3.5),
+                ];
+                p.add(egui::Shape::convex_polygon(
+                    pts,
+                    edge_color,
+                    egui::Stroke::NONE,
+                ));
             }
         }
     }
 
-    // Nodes, culled; hit-testing.
+    // Nodes, culled.
     let mut hit: Option<usize> = None;
-    let pointer_world = resp.hover_pos().map(|h| (h - rect.min - *pan) / *zoom);
     for i in 0..n {
-        let w0 = pos(i);
-        let s0 = to_screen(w0);
-        let srect = egui::Rect::from_min_size(s0, egui::vec2(W * *zoom, H * *zoom));
+        let w0 = pos(offsets, i);
+        let s0 = to_screen(*pan, *zoom, w0);
+        let nh = node_h(*zoom);
+        let srect = egui::Rect::from_min_size(s0, egui::vec2(W * *zoom, nh * *zoom));
         if !clip.intersects(srect) {
             continue;
         }
         if let Some(pw) = pointer_world {
-            let wrect = egui::Rect::from_min_size(w0.to_pos2(), egui::vec2(W, H));
+            let wrect = egui::Rect::from_min_size(w0.to_pos2(), egui::vec2(W, nh));
             if wrect.contains(pw.to_pos2()) {
                 hit = Some(i);
             }
@@ -1381,12 +1647,34 @@ fn image_graph_pane(
                 l.callers.get(&i).map_or(0, Vec::len)
             );
             p.text(
-                srect.left_bottom() + egui::vec2(4.0, -4.0),
-                egui::Align2::LEFT_BOTTOM,
+                srect.left_top() + egui::vec2(4.0, 16.0),
+                egui::Align2::LEFT_TOP,
                 info,
                 egui::FontId::monospace(9.0),
                 C_DIM,
             );
+        }
+        if *zoom >= 0.75 {
+            // Function content preview: hex + disasm, IDA style.
+            let f = &l.fns[i];
+            let mut y = srect.top() + 30.0;
+            for ii in f.entry..(f.entry + PREV_LINES).min(f.end) {
+                let line = l.lines.get(ii).map_or("", String::as_str);
+                let text = format!("{:<15} {}", insn_bytes(&l.d.insns[ii]), line);
+                let text = if text.chars().count() > 46 {
+                    format!("{}…", text.chars().take(45).collect::<String>())
+                } else {
+                    text
+                };
+                p.text(
+                    egui::Pos2::new(srect.left() + 4.0, y),
+                    egui::Align2::LEFT_TOP,
+                    text,
+                    egui::FontId::monospace(9.5),
+                    C_PLAIN,
+                );
+                y += LINE_H;
+            }
         }
     }
 
@@ -1394,17 +1682,13 @@ fn image_graph_pane(
     if let Some(h) = hit {
         let f = &l.fns[h];
         let tip = format!(
-            "fn[{h}] {}\ninsns {}, callers {}, calls {}",
+            "fn[{h}] {}\ninsns {}, callers {}, calls {}\nLMB select, dbl-LMB open, RMB menu",
             f.display_name(),
             f.len(),
             l.callers.get(&h).map_or(0, Vec::len),
             l.callees.get(&h).map_or(0, Vec::len)
         );
-        let resp = resp
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_ui(|ui| {
-                ui.monospace(tip);
-            });
+        let resp = resp.on_hover_text(tip);
         if resp.clicked() {
             *jump = Some(h);
         }
@@ -1412,21 +1696,45 @@ fn image_graph_pane(
             *jump = Some(h);
             *open_code = true;
         }
+        resp.context_menu(|ui| {
+            ui.label(format!("fn[{h}] {}", f.display_name()));
+            if ui.button("Open in Code view").clicked() {
+                ui.close_menu();
+                *jump = Some(h);
+                *open_code = true;
+            }
+            if ui.button("Show CFG").clicked() {
+                ui.close_menu();
+                *jump = Some(h);
+                *mode = GraphMode::Cfg;
+            }
+            if ui.button("Center on this node").clicked() {
+                ui.close_menu();
+                *focus = Some(h);
+            }
+            if ui.button("Copy name").clicked() {
+                ui.close_menu();
+                ui.output_mut(|o| o.copied_text = f.display_name().to_string());
+            }
+        });
     }
-    let _ = scroll;
 }
 
 // ---------------------------------------------------------------------------
-// CFG graph pane
+// CFG canvas (fixed zoom, pan + draggable blocks, hex disasm nodes)
 // ---------------------------------------------------------------------------
 
-fn graph_pane(
+#[allow(clippy::too_many_arguments)]
+fn cfg_canvas(
     ui: &mut egui::Ui,
     l: &Loaded,
     sel: usize,
     cfg: &qvm::CFG,
+    pan: &mut egui::Vec2,
+    fit: &mut bool,
+    offsets: &mut HashMap<(usize, usize), egui::Vec2>,
+    drag: &mut Option<usize>,
     scroll: &mut Option<usize>,
-    jump: &mut Option<usize>,
 ) {
     let n = cfg.blocks.len();
     if n == 0 {
@@ -1440,8 +1748,7 @@ fn graph_pane(
     const GY: f32 = 26.0;
     const M: f32 = 14.0;
 
-    // Per-block rendered lines: `B{bi} [start,end)` header + insn rows
-    // with hex bytes, IDA style.
+    // Per-block rendered lines: header + insn rows with hex bytes.
     let block_lines: Vec<Vec<String>> = cfg
         .blocks
         .iter()
@@ -1449,7 +1756,7 @@ fn graph_pane(
         .map(|(bi, b)| {
             let mut v = vec![format!("B{bi} [{}..{})", b.start, b.end)];
             for ii in b.start..b.end {
-                let hex = crate::state::insn_bytes(&l.d.insns[ii]);
+                let hex = insn_bytes(&l.d.insns[ii]);
                 let text = l.lines.get(ii).map_or(String::new(), |s| s.to_string());
                 v.push(format!("{hex:<15} {text}"));
             }
@@ -1476,31 +1783,73 @@ fn graph_pane(
             }
         }
     }
-    // Unreachable blocks (defensive): park them one past the deepest layer.
-    let max_depth = depth.iter().copied().max().unwrap_or(0);
-    let park = max_depth + 1;
+    let park = depth.iter().copied().max().unwrap_or(0) + 1;
     for (bi, s) in seen.iter().enumerate() {
         if !s {
             depth[bi] = park;
         }
     }
 
-    // Positions: stacked rows per column, variable heights.
-    let mut pos = vec![egui::Pos2::ZERO; n];
+    // Base positions: stacked rows per column, variable heights.
+    let mut base = vec![egui::Vec2::ZERO; n];
     let mut col_y: Vec<f32> = vec![M; depth.iter().copied().max().unwrap_or(0) + 1];
     for bi in 0..n {
         let d = depth[bi];
-        pos[bi] = egui::Pos2::new(M + d as f32 * (W + GX), col_y[d]);
+        base[bi] = egui::Vec2::new(M + d as f32 * (W + GX), col_y[d]);
         col_y[d] += heights[bi] + GY;
     }
     let total_w = M + (depth.iter().copied().max().unwrap_or(0) + 1) as f32 * (W + GX);
     let total_h = col_y.iter().copied().fold(M, f32::max);
 
-    ui.monospace(format!(
-        "CFG fn[{sel}] {} ({} blocks) — click a block to scroll Disassembly",
-        l.fns.get(sel).map_or("?", |f| f.display_name()),
-        n
-    ));
+    let pos = |offs: &HashMap<(usize, usize), egui::Vec2>, bi: usize| -> egui::Vec2 {
+        base[bi] + offs.get(&(sel, bi)).copied().unwrap_or_default()
+    };
+
+    let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+    let p = ui.painter_at(rect);
+
+    // Fit: center content.
+    if *fit {
+        *fit = false;
+        *pan = rect.size() / 2.0 - egui::Vec2::new(total_w / 2.0, total_h / 2.0);
+    }
+
+    // Wheel = vertical pan.
+    let wheel = ui.input(|i| i.raw_scroll_delta);
+    if resp.hovered() {
+        *pan += egui::Vec2::new(wheel.x, wheel.y);
+    }
+
+    // Hit test.
+    let pointer_world = resp.hover_pos().map(|h| h - rect.min - *pan);
+    let hit_at = |pw: Option<egui::Vec2>| -> Option<usize> {
+        let pw = pw?;
+        for (bi, h) in heights.iter().enumerate() {
+            let r = egui::Rect::from_min_size(pos(offsets, bi).to_pos2(), egui::vec2(W, *h));
+            if r.contains(pw.to_pos2()) {
+                return Some(bi);
+            }
+        }
+        None
+    };
+
+    // Drag: node if started on one, canvas pan otherwise.
+    if resp.drag_started() {
+        *drag = hit_at(pointer_world);
+    }
+    if let Some(dn) = *drag {
+        if resp.dragged() {
+            let e = offsets.entry((sel, dn)).or_default();
+            *e += resp.drag_delta();
+        }
+    } else if resp.dragged() {
+        *pan += resp.drag_delta();
+    }
+    if resp.drag_stopped() {
+        *drag = None;
+    }
+
+    let to_screen = |pan: egui::Vec2, w: egui::Vec2| rect.min + pan + w;
 
     // Edge label: branch op name for taken edges, "ft" for fallthrough.
     let edge_label = |bi: usize, s: usize| -> String {
@@ -1521,93 +1870,103 @@ fn graph_pane(
         "jmp".into()
     };
 
-    egui::ScrollArea::both()
-        .id_salt("cfggraph")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let (_rect, _) = ui.allocate_exact_size(egui::vec2(total_w, total_h), Sense::click());
-            let p = ui.painter();
-
-            // Edges first (under the nodes).
-            for (bi, b) in cfg.blocks.iter().enumerate() {
-                for &s in &b.succ {
-                    if s >= n {
-                        continue;
-                    }
-                    let from = egui::Pos2::new(pos[bi].x + W, pos[bi].y + heights[bi] / 2.0);
-                    let to = egui::Pos2::new(pos[s].x, pos[s].y + heights[s] / 2.0);
-                    let back = depth[s] <= depth[bi];
-                    let color = if back {
-                        Color32::from_rgb(180, 120, 60)
-                    } else if edge_label(bi, s) == "ft" {
-                        Color32::from_rgb(90, 150, 110)
-                    } else {
-                        Color32::from_rgb(110, 118, 128)
-                    };
-                    let mid_x = (from.x + to.x) / 2.0;
-                    let shape = egui::epaint::CubicBezierShape {
-                        points: [
-                            from,
-                            egui::Pos2::new(mid_x, from.y),
-                            egui::Pos2::new(mid_x, to.y),
-                            to,
-                        ],
-                        closed: false,
-                        fill: Color32::TRANSPARENT,
-                        stroke: egui::Stroke::new(1.2, color).into(),
-                    };
-                    p.add(shape);
-                    // Arrowhead.
-                    let dir = if to.x > from.x { -1.0 } else { 1.0 };
-                    let tip = egui::Pos2::new(to.x + 5.0 * dir, to.y);
-                    let pts = vec![
-                        tip,
-                        egui::Pos2::new(to.x - 3.0 * dir, to.y - 3.5),
-                        egui::Pos2::new(to.x - 3.0 * dir, to.y + 3.5),
-                    ];
-                    p.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
-                    // Condition label at the curve midpoint.
-                    let mid = egui::Pos2::new(
-                        (from.x + 3.0 * mid_x + 3.0 * mid_x + to.x) / 8.0,
-                        (from.y + 3.0 * from.y + 3.0 * to.y + to.y) / 8.0,
-                    );
-                    let lbl = edge_label(bi, s);
-                    let galley = p.layout_no_wrap(lbl.clone(), egui::FontId::monospace(9.5), color);
-                    let gsize = galley.size();
-                    let bg = egui::Rect::from_center_size(mid, gsize + egui::vec2(6.0, 2.0));
-                    p.rect_filled(bg, 2.0, Color32::from_rgb(24, 26, 30));
-                    p.galley(mid - gsize / 2.0, galley, color);
-                }
+    // Edges first (under the nodes).
+    for (bi, b) in cfg.blocks.iter().enumerate() {
+        for &s in &b.succ {
+            if s >= n {
+                continue;
             }
+            let a = to_screen(
+                *pan,
+                pos(offsets, bi) + egui::Vec2::new(W, heights[bi] / 2.0),
+            );
+            let bpt = to_screen(*pan, pos(offsets, s));
+            let bpt = egui::Pos2::new(bpt.x, bpt.y + heights[s] / 2.0);
+            let bound = egui::Rect::from_min_max(a.min(bpt), a.max(bpt));
+            if !rect.intersects(bound) {
+                continue;
+            }
+            let lbl = edge_label(bi, s);
+            let color = if lbl == "ft" {
+                Color32::from_rgb(90, 150, 110)
+            } else if depth[s] <= depth[bi] {
+                Color32::from_rgb(180, 120, 60)
+            } else {
+                Color32::from_rgb(110, 118, 128)
+            };
+            let mid_x = (a.x + bpt.x) / 2.0;
+            let shape = egui::epaint::CubicBezierShape {
+                points: [
+                    a,
+                    egui::Pos2::new(mid_x, a.y),
+                    egui::Pos2::new(mid_x, bpt.y),
+                    bpt,
+                ],
+                closed: false,
+                fill: Color32::TRANSPARENT,
+                stroke: egui::Stroke::new(1.2, color).into(),
+            };
+            p.add(shape);
+            let dir = if bpt.x > a.x { -1.0 } else { 1.0 };
+            let tip = egui::Pos2::new(bpt.x + 5.0 * dir, bpt.y);
+            let pts = vec![
+                tip,
+                egui::Pos2::new(bpt.x - 3.0 * dir, bpt.y - 3.5),
+                egui::Pos2::new(bpt.x - 3.0 * dir, bpt.y + 3.5),
+            ];
+            p.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+            // Condition label at the curve midpoint.
+            let mid = egui::Pos2::new(
+                (a.x + 3.0 * mid_x + 3.0 * mid_x + bpt.x) / 8.0,
+                (a.y + 3.0 * a.y + 3.0 * bpt.y + bpt.y) / 8.0,
+            );
+            let galley = p.layout_no_wrap(lbl.clone(), egui::FontId::monospace(9.5), color);
+            let gsize = galley.size();
+            let bg = egui::Rect::from_center_size(mid, gsize + egui::vec2(6.0, 2.0));
+            p.rect_filled(bg, 2.0, Color32::from_rgb(24, 26, 30));
+            p.galley(mid - gsize / 2.0, galley, color);
+        }
+    }
 
-            // Nodes: full disasm with hex bytes, IDA style.
-            for (bi, b) in cfg.blocks.iter().enumerate() {
-                let r = egui::Rect::from_min_size(pos[bi], egui::vec2(W, heights[bi]));
-                p.rect_filled(r, 3.0, Color32::from_rgb(38, 42, 50));
-                p.rect_stroke(r, 3.0, egui::Stroke::new(1.0, C_LBL));
-                let mut y = r.top() + 3.0;
-                for (li, line) in block_lines[bi].iter().enumerate() {
-                    let color = if li == 0 { C_LBL } else { C_PLAIN };
-                    p.text(
-                        egui::Pos2::new(r.left() + 6.0, y),
-                        egui::Align2::LEFT_TOP,
-                        line,
-                        egui::FontId::monospace(10.0),
-                        color,
-                    );
-                    y += LINE_H;
-                }
+    // Nodes: full disasm with hex bytes, draggable.
+    for (bi, b) in cfg.blocks.iter().enumerate() {
+        let s0 = to_screen(*pan, pos(offsets, bi));
+        let r = egui::Rect::from_min_size(s0, egui::vec2(W, heights[bi]));
+        if !rect.intersects(r) {
+            continue;
+        }
+        p.rect_filled(r, 3.0, Color32::from_rgb(38, 42, 50));
+        p.rect_stroke(r, 3.0, egui::Stroke::new(1.0, C_LBL));
+        let mut y = r.top() + 3.0;
+        for (li, line) in block_lines[bi].iter().enumerate() {
+            let color = if li == 0 { C_LBL } else { C_PLAIN };
+            p.text(
+                egui::Pos2::new(r.left() + 6.0, y),
+                egui::Align2::LEFT_TOP,
+                line,
+                egui::FontId::monospace(10.0),
+                color,
+            );
+            y += LINE_H;
+        }
 
-                let resp = ui.interact(r, egui::Id::new(("gnode", sel, bi)), Sense::click());
-                if resp.hovered() {
-                    p.rect_stroke(r, 3.0, egui::Stroke::new(1.8, C_FN));
-                }
-                if resp.clicked() {
-                    *scroll = Some(b.start);
-                }
-                if resp.double_clicked() {
-                    *jump = Some(sel);
-                }
+        let node_resp = ui.interact(r, egui::Id::new(("gnode", sel, bi)), Sense::click());
+        if node_resp.hovered() {
+            p.rect_stroke(r, 3.0, egui::Stroke::new(1.8, C_FN));
+        }
+        if node_resp.clicked() {
+            *scroll = Some(b.start);
+        }
+        node_resp.context_menu(|ui| {
+            ui.label(format!("B{bi} [{}..{})", b.start, b.end));
+            if ui.button("Scroll Disassembly here").clicked() {
+                ui.close_menu();
+                *scroll = Some(b.start);
+            }
+            if ui.button("Copy insn range").clicked() {
+                ui.close_menu();
+                ui.output_mut(|o| o.copied_text = format!("{}..{}", b.start, b.end));
             }
         });
+    }
 }
