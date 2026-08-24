@@ -11,6 +11,30 @@ Kit-relative paths. Start with [AGENT.md](../AGENT.md). Put input QVMs in `work/
 
 Put `tools/win32-qvm` on `PATH`, or call the exes by full path. PowerShell aliases `cpp` to `Copy-ItemProperty`; always run q3lcc via `cmd.exe` (see `scripts/build_qvm.ps1`).
 
+## 0. Build a mod QVM from C source (optional)
+
+When you have the mod's C sources instead of a stale `.qvm` (e.g. baseq3a),
+mirror the mod's own build script and only swap in the kit tools. Vanilla
+game module, flags as in its `compile.bat`:
+
+```bat
+rem per .c file (cwd = the source dir):
+q3lcc.exe -DQ3_VM -DQAGAME -S -Wf-g g_main.c
+rem then assemble:
+q3asm.exe -vq3 -m -v -o qagame -f qagame.q3asm
+```
+
+Kit-toolchain gotchas, verified against the shipped binaries:
+
+- The shipped `q3lcc`/`q3cpp` pair does **not** honor `-I`, and quoted
+  `#include`s are not searched relative to the includer either — they resolve
+  against the process CWD only. Compile with CWD inside the source dir, then
+  move the produced `.asm` files to your output dir.
+- Kit `q3asm` has no `-r` (a fork-only flag); use `-vq3 -m`.
+- Kit `q3asm -f` wants the full listfile name (`game.q3asm`; no auto-suffix).
+- Keep the `.q3asm` listfile flat (bare basenames) next to the `.asm`
+  outputs; copy any out-of-tree `.asm` (e.g. `g_syscalls.asm`) beside them.
+
 ## 1. Build probes
 
 Catalog and flags: [TOOLS.md](TOOLS.md).

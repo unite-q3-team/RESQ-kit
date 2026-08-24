@@ -74,7 +74,7 @@ probe_check <rebuilt.qvm>
 
 ## 7. Ловушки окружения
 
-PowerShell 5.1: нет `&&`; `>` пишет UTF-16LE; `Set-Content -Encoding UTF8` ставит BOM, ломающий cpp. Инлайн-Python с кавычками/регэкспами — в отдельный файл. Вызывайте `emit_qvm.ps1` без `2>&1`.
+PowerShell 5.1: нет `&&`; `>` пишет UTF-16LE; `Set-Content -Encoding UTF8` ставит BOM, ломающий cpp. Инлайн-Python с кавычками/регэкспами — в отдельный файл. Вызывайте `emit_qvm.ps1` без `2>&1`. `.ps1`-скрипты набора держите чисто ASCII (либо сохраняйте в UTF-8 *с* BOM): 5.1 читает файлы без BOM как ANSI, и один em-dash однажды сломал парсинг `build_qvm.ps1`.
 
 ## 8. Инструменты
 

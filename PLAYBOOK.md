@@ -72,7 +72,7 @@ probe_check <rebuilt.qvm>
 
 ## 7. Environment traps
 
-PowerShell 5.1: no `&&`; `>` is UTF-16LE; `Set-Content -Encoding UTF8` writes a BOM that breaks cpp. Inline Python with quotes/regex belongs in a file. Call `emit_qvm.ps1` without `2>&1`.
+PowerShell 5.1: no `&&`; `>` is UTF-16LE; `Set-Content -Encoding UTF8` writes a BOM that breaks cpp. Inline Python with quotes/regex belongs in a file. Call `emit_qvm.ps1` without `2>&1`. Kit `.ps1` scripts must stay pure ASCII (or be saved UTF-8 *with* BOM): 5.1 reads no-BOM files as ANSI, and a single em-dash once broke `build_qvm.ps1` parsing.
 
 ## 8. Tools
 

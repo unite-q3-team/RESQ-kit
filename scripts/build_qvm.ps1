@@ -1,3 +1,5 @@
+# Keep this file ASCII-only: Windows PowerShell 5.1 reads no-BOM files as
+# ANSI, and non-ASCII characters break parsing (see PLAYBOOK.md section 7).
 param(
   [Parameter(Mandatory = $true)]
   [string]$SrcDir,
@@ -13,7 +15,7 @@ $src = (Resolve-Path $SrcDir).Path
 if (-not $Stem) { $Stem = Split-Path $src -Leaf }
 $cFile = Join-Path $src "$Stem.c"
 $sys = Join-Path $src 'syscalls.asm'
-if (-not (Test-Path $cFile)) { throw "missing $cFile — run emit_qvm.ps1 first" }
+if (-not (Test-Path $cFile)) { throw "missing $cFile - run emit_qvm.ps1 first" }
 if (-not (Test-Path $sys)) { throw "missing $sys" }
 
 $tmp = Join-Path $env:USERPROFILE 'AppData\Local\Temp'
