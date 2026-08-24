@@ -5,11 +5,15 @@
 //! panels are built. That keeps borrows disjoint and egui happy.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use eframe::egui;
 use egui::{Color32, RichText, Sense, TextWrapMode};
 
 use crate::state::{escape, insn_bytes, Loaded};
+
+/// Keep at most this many decompiled functions cached.
+const C_CACHE_CAP: usize = 128;
 
 #[derive(Clone, Copy, Default, PartialEq)]
 enum BottomTab {
@@ -103,7 +107,7 @@ pub struct App {
     path_edit: String,
     filter: String,
     selected: Option<usize>,
-    c_cache: HashMap<usize, String>,
+    c_cache: HashMap<usize, Arc<str>>,
     rename_buf: String,
     status: String,
     tab: BottomTab,
@@ -140,6 +144,8 @@ pub struct App {
     prev_c: f32,
     /// Floating memory hex-dump window.
     hex_view: Option<HexReq>,
+    /// Last window title set (avoids per-frame ViewportCommand spam).
+    title: Option<String>,
 }
 
 impl App {
@@ -175,6 +181,7 @@ impl App {
             prev_d: 0.0,
             prev_c: 0.0,
             hex_view: None,
+            title: None,
         };
         if !app.path_edit.is_empty() {
             app.load_path(&app.path_edit.clone());
@@ -313,6 +320,23 @@ impl eframe::App for App {
             self.save_map_action();
         }
 
+        // Window title reflects the loaded image.
+        let want_title = self
+            .loaded
+            .as_ref()
+            .map(|l| {
+                let name = l
+                    .path
+                    .file_name()
+                    .map_or_else(|| l.path.display().to_string(), |n| n.display().to_string());
+                format!("{name} — RESQ kit")
+            })
+            .unwrap_or_else(|| "RESQ kit - QVM analyzer".into());
+        if self.title.as_deref() != Some(want_title.as_str()) {
+            self.title = Some(want_title.clone());
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(want_title));
+        }
+
         // Panel order matters: side/bottom panels must be shown BEFORE the
         // CentralPanel, otherwise they paint on top of the central content
         // and hide its scrollable area.
@@ -419,7 +443,7 @@ impl App {
                     })
                     .collect();
                 let out = l.path.with_extension(format!("fn{sel}_{name}.c"));
-                match std::fs::write(&out, &text) {
+                match std::fs::write(&out, &*text) {
                     Ok(()) => self.status = format!("exported -> {}", out.display()),
                     Err(e) => self.status = format!("write {}: {e}", out.display()),
                 }
@@ -832,7 +856,9 @@ impl App {
                     if let Some(x) = &mut self.loaded {
                         x.rename(sel, &new_name);
                     }
-                    self.c_cache.remove(&sel);
+                    // Names propagate into the C output of *other* functions
+                    // that call this one, so the whole cache is stale.
+                    self.c_cache.clear();
                     self.status = format!("renamed fn[{sel}] -> {new_name}");
                 }
                 ui.separator();
@@ -888,14 +914,17 @@ impl App {
 
             ui.separator();
 
-            // Decompiled C (cache miss -> decompile now, sequential borrows).
-            let text = match self.c_cache.get(&sel) {
+            // Decompiled C (cache miss -> decompile now; Arc clone per frame).
+            let text: Arc<str> = match self.c_cache.get(&sel) {
                 Some(t) => t.clone(),
                 None => {
                     let t = match self.loaded.as_ref().unwrap().decompile(sel) {
                         Ok(s) => s,
-                        Err(e) => format!("// decompile error: {e}\n"),
+                        Err(e) => format!("// decompile error: {e}\n").into(),
                     };
+                    if self.c_cache.len() >= C_CACHE_CAP {
+                        self.c_cache.clear();
+                    }
                     self.c_cache.insert(sel, t.clone());
                     t
                 }
@@ -909,7 +938,7 @@ impl App {
                 traps: &l.trap_names,
                 entries: &l.entry_to_idx,
             };
-            let fn_ranges: Vec<(usize, usize)> = l.fns.iter().map(|f| (f.entry, f.end)).collect();
+            let fn_ranges = &l.fn_ranges;
             let cfg_res = match (self.center, self.graph_mode) {
                 (CenterTab::Graph, GraphMode::Cfg) => Some(l.cfg(sel)),
                 _ => None,
@@ -953,7 +982,7 @@ impl App {
                             paint_row_bg(
                                 ui,
                                 mono_h,
-                                cross_tint_insn(ii, hover_fn_prev, &fn_ranges),
+                                cross_tint_insn(ii, hover_fn_prev, fn_ranges),
                             );
                             let segs = d_segments(&l.lines[ii], &tok);
                             let mut sink = Sink {
@@ -1182,7 +1211,7 @@ fn d_segments(line: &str, tok: &Tok) -> Vec<Seg> {
             }
         }
     }
-    out
+    merge_plain(out)
 }
 
 fn classify_ident(w: &str, tok: &Tok, out: &mut Vec<Seg>) {
@@ -1278,7 +1307,7 @@ fn c_segments(line: &str, tok: &Tok) -> Vec<Seg> {
             i += 1;
         }
     }
-    out
+    merge_plain(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1317,22 +1346,21 @@ fn merge_plain(mut segs: Vec<Seg>) -> Vec<Seg> {
 
 /// Render one source line as a single horizontal run of tight tokens.
 fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
-    let segs = merge_plain(segs.to_vec());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         for s in segs {
             match s {
-                Seg::P(t, c) => plain_label(ui, &t, c),
+                Seg::P(t, c) => plain_label(ui, t, *c),
                 Seg::FnTok(t, idx) => {
-                    let r = tok_label(ui, &t, C_FN);
+                    let r = tok_label(ui, t, C_FN);
                     if r.hovered() {
-                        *sink.hover_fn = Some(idx);
+                        *sink.hover_fn = Some(*idx);
                     }
                     if r.double_clicked() {
-                        *sink.jump = Some(idx);
+                        *sink.jump = Some(*idx);
                     }
                     r.context_menu(|ui| {
-                        let f = &l.fns[idx];
+                        let f = &l.fns[*idx];
                         let addr = l.d.insns[f.entry].addr;
                         ui.label(format!(
                             "fn[{idx}] {} @ insn {} ({addr:#x})",
@@ -1341,14 +1369,14 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                         ));
                         if ui.button("Go to function").clicked() {
                             ui.close_menu();
-                            *sink.jump = Some(idx);
+                            *sink.jump = Some(*idx);
                         }
                         if ui
                             .button(format!("Xrefs to {}", f.display_name()))
                             .clicked()
                         {
                             ui.close_menu();
-                            *sink.xref_fn = Some(idx);
+                            *sink.xref_fn = Some(*idx);
                         }
                         if ui.button("Copy name").clicked() {
                             ui.close_menu();
@@ -1359,24 +1387,24 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                     });
                 }
                 Seg::LblTok(t, n) => {
-                    let r = tok_label(ui, &t, C_LBL);
+                    let r = tok_label(ui, t, C_LBL);
                     if r.clicked() {
-                        *sink.scroll = Some(n);
+                        *sink.scroll = Some(*n);
                     }
                 }
                 Seg::StrTok(t, addr) => {
-                    let r = tok_label(ui, &t, C_STR);
+                    let r = tok_label(ui, t, C_STR);
                     r.context_menu(|ui| {
                         ui.label(format!("@{addr}"));
                         if ui.button("Hex dump string").clicked() {
                             ui.close_menu();
                             *sink.hexreq = Some(HexReq {
                                 title: format!("string @ {addr}"),
-                                addr,
+                                addr: *addr,
                                 len: t.len().max(1),
                             });
                         }
-                        ui.menu_button("Xrefs to string", |ui| match l.string_refs.get(&addr) {
+                        ui.menu_button("Xrefs to string", |ui| match l.string_refs.get(addr) {
                             Some(v) if !v.is_empty() => {
                                 for fi in v.iter().take(30) {
                                     let f = &l.fns[*fi];
@@ -1401,7 +1429,7 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                 }
                 Seg::NumTok(t) => {
                     let val = t.parse::<i32>().ok();
-                    let r = tok_label(ui, &t, C_NUM);
+                    let r = tok_label(ui, t, C_NUM);
                     r.context_menu(|ui| {
                         ui.label(format!("operand {t}"));
                         if let Some(v) = val {

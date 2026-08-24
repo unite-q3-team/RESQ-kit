@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use qvm::{disassemble, load, load_map, trap_name, Disassembly, Insn, Opcode, Qvm};
 
@@ -106,6 +107,8 @@ pub struct Loaded {
     pub trap_names: HashSet<String>,
     /// Whole-image call graph layout.
     pub callgraph: CallGraph,
+    /// `(entry, end)` per fn index, precomputed for pane tinting.
+    pub fn_ranges: Vec<(usize, usize)>,
 }
 
 impl Loaded {
@@ -322,6 +325,8 @@ impl Loaded {
         }
         cg.col_len = rows_by_col;
 
+        let fn_ranges: Vec<(usize, usize)> = fns.iter().map(|f| (f.entry, f.end)).collect();
+
         Ok(Loaded {
             path: path.to_path_buf(),
             qvm,
@@ -337,6 +342,7 @@ impl Loaded {
             name_to_idx,
             trap_names,
             callgraph: cg,
+            fn_ranges,
         })
     }
 
@@ -356,11 +362,7 @@ impl Loaded {
                 }
             }
         }
-        self.callgraph
-            .roots
-            .first()
-            .copied()
-            .unwrap_or(self.fns.len().saturating_sub(1))
+        self.callgraph.roots.first().copied().unwrap_or(0)
     }
 
     /// One byte of VM memory (data | lit | zeroed bss) at a masked address.
@@ -380,13 +382,13 @@ impl Loaded {
     }
 
     /// Decompiled identity C for one function (uncached; the GUI caches).
-    pub fn decompile(&self, idx: usize) -> Result<String, String> {
+    pub fn decompile(&self, idx: usize) -> Result<Arc<str>, String> {
         let f = self.fns.get(idx).ok_or("bad fn index")?;
         let data = self.qvm.data_int32();
         let cfg = qvm::build_cfg(&self.d, (f.entry, f.end), &data).ok_or("degenerate CFG")?;
         let frame = self.d.insns[cfg.entry].operand.unwrap_or(0);
         let fun = qvm::decompile_function(&self.d, &cfg, frame, &data);
-        Ok(qvm::fmt_function(&fun, &self.qvm))
+        Ok(qvm::fmt_function(&fun, &self.qvm).into())
     }
 
     /// Disasm pane slice for one function (instruction-index range).
