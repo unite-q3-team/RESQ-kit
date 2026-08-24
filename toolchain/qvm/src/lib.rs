@@ -24,7 +24,8 @@ pub mod types;
 
 pub use cfg::{build_all, build_cfg, build_functions, Block, CFG};
 pub use decompile::{
-    decompile_function, fmt_function, reachable_blocks, Expr, Function, Stmt, Terminator,
+    decompile_function, fmt_function, fmt_function_lines, reachable_blocks, Expr, Function, Stmt,
+    Terminator,
 };
 pub use disasm::{disassemble, DisasmError, Disassembly, Insn};
 pub use emu::{Emu, EmuError, Memory, Stats, SyscallHandler};

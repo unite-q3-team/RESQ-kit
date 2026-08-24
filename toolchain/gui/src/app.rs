@@ -10,7 +10,10 @@ use std::sync::Arc;
 use eframe::egui;
 use egui::{Color32, RichText, Sense, TextWrapMode};
 
-use crate::state::{escape, insn_bytes, Loaded};
+use crate::state::{escape, insn_bytes, opcode_help, Loaded};
+
+/// Cached decompilation: text + per-line insn-range map.
+type DecompileCache = (std::sync::Arc<str>, std::sync::Arc<[(usize, usize)]>);
 
 /// Keep at most this many decompiled functions cached.
 const C_CACHE_CAP: usize = 128;
@@ -21,6 +24,7 @@ enum BottomTab {
     Strings,
     Traps,
     Xrefs,
+    Bss,
     Info,
 }
 
@@ -107,8 +111,9 @@ pub struct App {
     path_edit: String,
     filter: String,
     strings_filter: String,
+    bss_filter: String,
     selected: Option<usize>,
-    c_cache: HashMap<usize, Arc<str>>,
+    c_cache: HashMap<usize, DecompileCache>,
     rename_buf: String,
     status: String,
     tab: BottomTab,
@@ -135,6 +140,11 @@ pub struct App {
     scroll_to: Option<usize>,
     /// Cross-pane highlight (C token hover -> disasm function range tint).
     hover_fn: Option<usize>,
+    /// Hovered Identity C line -> insn range tinted in Disassembly.
+    c_hover_range: Option<(usize, usize)>,
+    /// Measured world-space widths of call-graph nodes (content-sized).
+    img_w: HashMap<usize, f32>,
+    img_colw: Vec<f32>,
     /// Navigation history (back / forward).
     hist: Vec<usize>,
     hist_fwd: Vec<usize>,
@@ -157,6 +167,7 @@ impl App {
             path_edit: initial.unwrap_or_default(),
             filter: String::new(),
             strings_filter: String::new(),
+            bss_filter: String::new(),
             selected: None,
             c_cache: HashMap::new(),
             rename_buf: String::new(),
@@ -177,6 +188,9 @@ impl App {
             graph_focus: None,
             scroll_to: None,
             hover_fn: None,
+            c_hover_range: None,
+            img_w: HashMap::new(),
+            img_colw: Vec::new(),
             hist: Vec::new(),
             hist_fwd: Vec::new(),
             sync_scroll: false,
@@ -208,6 +222,9 @@ impl App {
                 self.c_cache.clear();
                 self.scroll_to = l.fns.first().map(|f| f.entry);
                 self.hover_fn = None;
+                self.c_hover_range = None;
+                self.img_w.clear();
+                self.img_colw.clear();
                 self.graph_fit = false;
                 self.hist.clear();
                 self.hist_fwd.clear();
@@ -432,7 +449,7 @@ impl App {
         };
         let Some(sel) = self.selected else { return };
         match l.decompile(sel) {
-            Ok(text) => {
+            Ok((text, _)) => {
                 let raw = l
                     .fns
                     .get(sel)
@@ -473,7 +490,7 @@ impl App {
                 f.entry
             ));
             match l.decompile(f.idx) {
-                Ok(text) => body.push_str(&text),
+                Ok((text, _)) => body.push_str(&text),
                 Err(e) => body.push_str(&format!("// decompile error: {e}\n")),
             }
             body.push('\n');
@@ -678,6 +695,7 @@ impl App {
                         (BottomTab::Strings, "Strings"),
                         (BottomTab::Traps, "Traps"),
                         (BottomTab::Xrefs, "Xrefs"),
+                        (BottomTab::Bss, "BSS"),
                         (BottomTab::Info, "Info"),
                     ] {
                         if ui.selectable_label(self.tab == tab, name).clicked() {
@@ -840,6 +858,90 @@ impl App {
                                 }
                             });
                     }
+                    BottomTab::Bss => {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.bss_filter)
+                                .hint_text("filter globals by address / function name...")
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        let needle = self.bss_filter.to_lowercase();
+                        let (b0, b1) = l.bss_range;
+                        ui.monospace(format!(
+                            "BSS {b0:#x}..{b1:#x} ({} referenced addresses)",
+                            l.bss_refs.len()
+                        ));
+                        let rows: Vec<(&i32, &Vec<usize>)> = l
+                            .bss_refs
+                            .iter()
+                            .filter(|(a, users)| {
+                                needle.is_empty()
+                                    || format!("{a:#x}").contains(&needle)
+                                    || format!("{a}").contains(&needle)
+                                    || users.iter().any(|u| {
+                                        l.fns[*u].display_name().to_lowercase().contains(&needle)
+                                    })
+                            })
+                            .collect();
+                        egui::ScrollArea::vertical()
+                            .id_salt("bss")
+                            .auto_shrink([false, false])
+                            .show_rows(ui, mono_h, rows.len(), |ui, range| {
+                                for r in range {
+                                    let (addr, users) = rows[r];
+                                    let names: Vec<String> = users
+                                        .iter()
+                                        .take(3)
+                                        .map(|u| l.fns[*u].display_name().to_string())
+                                        .collect();
+                                    let more = users.len().saturating_sub(3);
+                                    let txt = if more > 0 {
+                                        format!(
+                                            "@{addr:#10x}  ({}) {} +{more}",
+                                            users.len(),
+                                            names.join(", ")
+                                        )
+                                    } else {
+                                        format!(
+                                            "@{addr:#10x}  ({}) {}",
+                                            users.len(),
+                                            names.join(", ")
+                                        )
+                                    };
+                                    let resp = ui.selectable_label(false, &txt);
+                                    resp.context_menu(|ui| {
+                                        ui.label(format!("@{addr:#x}"));
+                                        if ui.button("Hex dump memory").clicked() {
+                                            ui.close_menu();
+                                            self.hex_view = Some(HexReq {
+                                                title: format!("bss @ {addr:#x}"),
+                                                addr: *addr,
+                                                len: 128,
+                                            });
+                                        }
+                                        ui.menu_button("Xrefs", |ui| {
+                                            for fi in users.iter().take(30) {
+                                                let f = &l.fns[*fi];
+                                                if ui
+                                                    .button(format!(
+                                                        "fn[{fi}] {}",
+                                                        f.display_name()
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    ui.close_menu();
+                                                    *jump = Some(*fi);
+                                                }
+                                            }
+                                        });
+                                    });
+                                    if resp.clicked() {
+                                        if let Some(&first) = users.first() {
+                                            *jump = Some(first);
+                                        }
+                                    }
+                                }
+                            });
+                    }
                     BottomTab::Info => {
                         ui.monospace(format!("{}", l.qvm));
                         ui.monospace(format!("file: {}", l.path.display()));
@@ -938,19 +1040,27 @@ impl App {
 
             // Decompiled C (cache miss -> decompile now; Arc clone per frame).
             let text: Arc<str> = match self.c_cache.get(&sel) {
-                Some(t) => t.clone(),
+                Some((t, _)) => t.clone(),
                 None => {
-                    let t = match self.loaded.as_ref().unwrap().decompile(sel) {
-                        Ok(s) => s,
-                        Err(e) => format!("// decompile error: {e}\n").into(),
+                    let (t, map) = match self.loaded.as_ref().unwrap().decompile(sel) {
+                        Ok(r) => r,
+                        Err(e) => (
+                            format!("// decompile error: {e}\n").into(),
+                            Vec::new().into(),
+                        ),
                     };
                     if self.c_cache.len() >= C_CACHE_CAP {
                         self.c_cache.clear();
                     }
-                    self.c_cache.insert(sel, t.clone());
-                    t
+                    self.c_cache.insert(sel, (t.clone(), map));
+                    self.c_cache.get(&sel).unwrap().0.clone()
                 }
             };
+            let line_map: Arc<[(usize, usize)]> = self
+                .c_cache
+                .get(&sel)
+                .map(|(_, m)| m.clone())
+                .unwrap_or_default();
 
             // Owned/shared data for the pane closures (no &mut self inside).
             let l = self.loaded.as_ref().unwrap();
@@ -972,7 +1082,9 @@ impl App {
             let mut xref_loc: Option<usize> = None;
             let mut open_code = false;
             let hover_fn_prev = self.hover_fn;
+            let c_range_prev = self.c_hover_range;
             let mut new_hover_fn: Option<usize> = None;
+            let mut new_c_range: Option<(usize, usize)> = None;
             let scroll_req: Option<usize> = self.scroll_to.take();
             let sync_to_d = self.sync_to_d.take();
             let sync_to_c = self.sync_to_c.take();
@@ -1001,11 +1113,17 @@ impl App {
                     let d_out = sa.show_rows(&mut cols[0], mono_h, range.len(), |ui, rows| {
                         for i in rows {
                             let ii = range.start + i;
-                            paint_row_bg(
-                                ui,
-                                mono_h,
-                                cross_tint_insn(ii, hover_fn_prev, fn_ranges),
-                            );
+                            let tint = if let Some((rs, re)) = c_range_prev {
+                                if ii >= rs && ii < re {
+                                    Some(TINT_ENTRY)
+                                } else {
+                                    cross_tint_insn(ii, hover_fn_prev, fn_ranges)
+                                }
+                            } else {
+                                cross_tint_insn(ii, hover_fn_prev, fn_ranges)
+                            };
+                            paint_row_bg(ui, mono_h, tint);
+                            let ins = &l.d.insns[ii];
                             let segs = d_segments(&l.lines[ii], &tok);
                             let mut sink = Sink {
                                 jump: &mut jump_loc,
@@ -1015,6 +1133,22 @@ impl App {
                                 xref_fn: &mut xref_loc,
                             };
                             render_row(ui, l, &segs, &mut sink);
+                            // Instruction help tooltip on hover.
+                            let row = egui::Rect::from_min_size(
+                                ui.available_rect_before_wrap().min,
+                                egui::vec2(ui.available_width(), mono_h),
+                            );
+                            let mut help =
+                                format!("[{}] {}", ins.op.name(), opcode_help(ins.op));
+                            if let Some(t) = ins.target {
+                                help.push_str(&format!("\ntarget: insn {t}"));
+                            }
+                            help.push_str(&format!(
+                                "\naddr {:#x}, {} bytes",
+                                ins.addr, ins.size
+                            ));
+                            ui.interact(row, egui::Id::new(("drow", ii)), Sense::hover())
+                                .on_hover_text(help);
                         }
                     });
                     d_now = d_out.state.offset.y;
@@ -1040,6 +1174,25 @@ impl App {
                                 xref_fn: &mut xref_loc,
                             };
                             render_row(ui, l, &segs, &mut sink);
+                            // Hover/click a C line -> highlight its instructions.
+                            let span = line_map.get(i).copied();
+                            let row = egui::Rect::from_min_size(
+                                ui.available_rect_before_wrap().min,
+                                egui::vec2(ui.available_width(), mono_h),
+                            );
+                            let r = ui.interact(
+                                row,
+                                egui::Id::new(("crow", sel, i)),
+                                Sense::click(),
+                            );
+                            if r.hovered() {
+                                new_c_range = span;
+                            }
+                            if r.clicked() {
+                                if let Some((rs, _)) = span {
+                                    pending_scroll = Some(rs);
+                                }
+                            }
                         }
                     });
                     c_now = c_out.state.offset.y;
@@ -1050,6 +1203,7 @@ impl App {
                         l,
                         sel,
                         &cfg,
+                        &tok,
                         &mut self.cfg_pan,
                         &mut self.cfg_zoom,
                         &mut self.cfg_fit,
@@ -1065,12 +1219,15 @@ impl App {
                             ui,
                             l,
                             sel,
+                            &tok,
                             &mut self.graph_zoom,
                             &mut self.graph_pan,
                             &mut self.graph_fit,
                             &mut self.graph_focus,
                             &mut self.img_offsets,
                             &mut self.img_drag,
+                            &mut self.img_w,
+                            &mut self.img_colw,
                             &mut self.graph_mode,
                             &mut jump_loc,
                             &mut open_code,
@@ -1094,6 +1251,7 @@ impl App {
 
             // Apply collected actions.
             self.hover_fn = new_hover_fn;
+            self.c_hover_range = new_c_range;
             self.scroll_to = pending_scroll;
             if hex_loc.is_some() {
                 self.hex_view = hex_loc;
@@ -1480,50 +1638,96 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
 // Whole-image call graph
 // ---------------------------------------------------------------------------
 
+/// Measure monospace text width (world units at the given font size).
+fn p_width(ui: &egui::Ui, text: &str, size: f32) -> f32 {
+    ui.ctx().fonts(|f| {
+        f.layout_no_wrap(
+            text.to_string(),
+            egui::FontId::monospace(size),
+            Color32::WHITE,
+        )
+        .size()
+        .x
+    })
+}
+
 /// Whole-image call graph: pan (drag), zoom (scroll), draggable nodes,
-/// RMB context menu, double-click opens the function.
+/// RMB context menu, double-click opens the function. Nodes are sized to
+/// their content (name, stats, disasm preview with syntax colors).
 #[allow(clippy::too_many_arguments)]
 fn image_graph_pane(
     ui: &mut egui::Ui,
     l: &Loaded,
     sel: usize,
+    tok: &Tok,
     zoom: &mut f32,
     pan: &mut egui::Vec2,
     fit: &mut bool,
     focus: &mut Option<usize>,
     offsets: &mut HashMap<usize, egui::Vec2>,
     drag: &mut Option<usize>,
+    img_w: &mut HashMap<usize, f32>,
+    img_colw: &mut Vec<f32>,
     mode: &mut GraphMode,
     jump: &mut Option<usize>,
     open_code: &mut bool,
 ) {
-    const W: f32 = 168.0;
+    const W_MIN: f32 = 150.0;
+    const W_MAX: f32 = 560.0;
     const H: f32 = 36.0;
-    const GX: f32 = 44.0;
-    const GY: f32 = 12.0;
+    const GX: f32 = 56.0;
+    const GY: f32 = 14.0;
     const M: f32 = 12.0;
     const PREV_LINES: usize = 6;
     const LINE_H: f32 = 12.0;
 
     let cg = &l.callgraph;
     let n = l.fns.len();
-    let node_h = |zi: f32| {
+
+    // Measure content-sized world widths once per load (font-size 1.0 basis).
+    if img_w.is_empty() && n > 0 {
+        for f in &l.fns {
+            let mut w = p_width(ui, f.display_name(), 10.0);
+            w = w.max(p_width(
+                ui,
+                &format!(
+                    "{} insns | calls {} | callers {}",
+                    f.len(),
+                    l.callees.get(&f.idx).map_or(0, Vec::len),
+                    l.callers.get(&f.idx).map_or(0, Vec::len)
+                ),
+                9.0,
+            ));
+            for ii in f.entry..(f.entry + PREV_LINES).min(f.end) {
+                let text = format!("{:<15} {}", insn_bytes(&l.d.insns[ii]), l.lines[ii]);
+                w = w.max(p_width(ui, &text, 9.5));
+            }
+            img_w.insert(f.idx, w.clamp(W_MIN, W_MAX) + 10.0);
+        }
+        let mut colw = vec![0.0f32; cg.max_depth + 1];
+        for f in &l.fns {
+            let d = cg.depth[f.idx];
+            colw[d] = colw[d].max(img_w.get(&f.idx).copied().unwrap_or(W_MIN));
+        }
+        *img_colw = colw;
+    }
+    let col_x = |d: usize| -> f32 { M + img_colw.iter().take(d).sum::<f32>() + d as f32 * GX };
+    let width = |i: usize| -> f32 { img_w.get(&i).copied().unwrap_or(W_MIN) };
+    let prev_lines = |i: usize| -> usize { l.fns[i].len().min(PREV_LINES) };
+    let node_h = |i: usize, zi: f32| {
         if zi >= 0.60 {
-            H + PREV_LINES as f32 * LINE_H
+            H + prev_lines(i) as f32 * LINE_H
         } else {
             H
         }
     };
     let base_pos = |i: usize| -> egui::Vec2 {
-        egui::Vec2::new(
-            M + cg.depth[i] as f32 * (W + GX),
-            M + cg.row[i] as f32 * (H + GY),
-        )
+        egui::Vec2::new(col_x(cg.depth[i]), M + cg.row[i] as f32 * (H + GY))
     };
     let pos = |offs: &HashMap<usize, egui::Vec2>, i: usize| -> egui::Vec2 {
         base_pos(i) + offs.get(&i).copied().unwrap_or_default()
     };
-    let total_w = M + (cg.max_depth + 1) as f32 * (W + GX);
+    let total_w = M + img_colw.iter().sum::<f32>() + cg.max_depth as f32 * GX;
     let total_h = M + cg.col_len.iter().copied().max().unwrap_or(1) as f32 * (H + GY);
 
     let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
@@ -1541,7 +1745,7 @@ fn image_graph_pane(
         *focus = None;
         if fi < n {
             *zoom = 1.0; // readable by default: preview text visible
-            let c = pos(offsets, fi) + egui::vec2(W / 2.0, node_h(*zoom) / 2.0);
+            let c = pos(offsets, fi) + egui::vec2(width(fi) / 2.0, node_h(fi, *zoom) / 2.0);
             *pan = rect.size() / 2.0 - c * *zoom;
         }
     }
@@ -1567,8 +1771,10 @@ fn image_graph_pane(
     let hit_at = |pw: Option<egui::Vec2>| -> Option<usize> {
         let pw = pw?;
         for i in 0..n {
-            let r =
-                egui::Rect::from_min_size(pos(offsets, i).to_pos2(), egui::vec2(W, node_h(*zoom)));
+            let r = egui::Rect::from_min_size(
+                pos(offsets, i).to_pos2(),
+                egui::vec2(width(i), node_h(i, *zoom)),
+            );
             if r.contains(pw.to_pos2()) {
                 return Some(i);
             }
@@ -1602,11 +1808,11 @@ fn image_graph_pane(
             let a = to_screen(
                 *pan,
                 *zoom,
-                pos(offsets, *caller) + egui::vec2(W, node_h(*zoom) / 2.0),
+                pos(offsets, *caller) + egui::vec2(width(*caller), node_h(*caller, *zoom) / 2.0),
             );
             for &t in callees_list {
                 let b = to_screen(*pan, *zoom, pos(offsets, t));
-                let b = egui::Pos2::new(b.x, b.y + node_h(*zoom) / 2.0);
+                let b = egui::Pos2::new(b.x, b.y + node_h(t, *zoom) / 2.0);
                 let bound = egui::Rect::from_min_max(a.min(b), a.max(b));
                 if !clip.intersects(bound) {
                     continue;
@@ -1640,12 +1846,13 @@ fn image_graph_pane(
         }
     }
 
-    // Nodes, culled.
+    // Nodes, culled. Content-sized, disasm preview with syntax colors.
     for i in 0..n {
         let w0 = pos(offsets, i);
         let s0 = to_screen(*pan, *zoom, w0);
-        let nh = node_h(*zoom);
-        let srect = egui::Rect::from_min_size(s0, egui::vec2(W * *zoom, nh * *zoom));
+        let nw = width(i);
+        let nh = node_h(i, *zoom);
+        let srect = egui::Rect::from_min_size(s0, egui::vec2(nw * *zoom, nh * *zoom));
         if !clip.intersects(srect) {
             continue;
         }
@@ -1670,11 +1877,6 @@ fn image_graph_pane(
         let z = *zoom;
         if z >= 0.30 {
             let label = l.fns[i].display_name();
-            let label = if label.chars().count() > 22 {
-                format!("{}…", label.chars().take(21).collect::<String>())
-            } else {
-                label.to_string()
-            };
             let color = if named { C_FN } else { C_DIM };
             p.text(
                 srect.left_top() + egui::vec2(4.0, 3.0) * z,
@@ -1700,24 +1902,27 @@ fn image_graph_pane(
             );
         }
         if z >= 0.60 {
-            // Function content preview: hex + disasm, IDA style.
+            // Function content preview: hex + disasm, syntax colored.
             let f = &l.fns[i];
             let mut y = srect.top() + 30.0 * z;
-            for ii in f.entry..(f.entry + PREV_LINES).min(f.end) {
+            let font = egui::FontId::monospace(9.5 * z);
+            for ii in f.entry..(f.entry + prev_lines(i)).min(f.end) {
                 let line = l.lines.get(ii).map_or("", String::as_str);
                 let text = format!("{:<15} {}", insn_bytes(&l.d.insns[ii]), line);
-                let text = if text.chars().count() > 46 {
-                    format!("{}…", text.chars().take(45).collect::<String>())
-                } else {
-                    text
-                };
-                p.text(
-                    egui::Pos2::new(srect.left() + 4.0 * z, y),
-                    egui::Align2::LEFT_TOP,
-                    text,
-                    egui::FontId::monospace(9.5 * z),
-                    C_PLAIN,
-                );
+                let mut cx = srect.left() + 4.0 * z;
+                for seg in d_segments(&text, tok) {
+                    let (t, c) = match seg {
+                        Seg::P(t, c) => (t, c),
+                        Seg::FnTok(t, _) => (t, C_FN),
+                        Seg::StrTok(t, _) => (t, C_STR),
+                        Seg::NumTok(t) => (t, C_NUM),
+                        Seg::LblTok(t, _) => (t, C_LBL),
+                    };
+                    let galley = p.layout_no_wrap(t, font.clone(), c);
+                    let gp = egui::Pos2::new(cx, y);
+                    p.galley(gp, galley.clone(), c);
+                    cx += galley.size().x;
+                }
                 y += LINE_H * z;
             }
         }
@@ -1774,6 +1979,7 @@ fn cfg_canvas(
     l: &Loaded,
     sel: usize,
     cfg: &qvm::CFG,
+    tok: &Tok,
     pan: &mut egui::Vec2,
     zoom: &mut f32,
     fit: &mut bool,
@@ -1996,14 +2202,31 @@ fn cfg_canvas(
         let z = *zoom;
         let mut y = r.top() + 3.0 * z;
         for (li, line) in block_lines[bi].iter().enumerate() {
-            let color = if li == 0 { C_LBL } else { C_PLAIN };
-            p.text(
-                egui::Pos2::new(r.left() + 6.0 * z, y),
-                egui::Align2::LEFT_TOP,
-                line,
-                egui::FontId::monospace(10.0 * z),
-                color,
-            );
+            if li == 0 {
+                p.text(
+                    egui::Pos2::new(r.left() + 6.0 * z, y),
+                    egui::Align2::LEFT_TOP,
+                    line,
+                    egui::FontId::monospace(10.0 * z),
+                    C_LBL,
+                );
+                y += LINE_H * z;
+                continue;
+            }
+            let font = egui::FontId::monospace(10.0 * z);
+            let mut cx = r.left() + 6.0 * z;
+            for seg in d_segments(line, tok) {
+                let (t, c) = match seg {
+                    Seg::P(t, c) => (t, c),
+                    Seg::FnTok(t, _) => (t, C_FN),
+                    Seg::StrTok(t, _) => (t, C_STR),
+                    Seg::NumTok(t) => (t, C_NUM),
+                    Seg::LblTok(t, _) => (t, C_LBL),
+                };
+                let galley = p.layout_no_wrap(t, font.clone(), c);
+                p.galley(egui::Pos2::new(cx, y), galley.clone(), c);
+                cx += galley.size().x;
+            }
             y += LINE_H * z;
         }
 

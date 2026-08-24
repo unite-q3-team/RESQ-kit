@@ -26,7 +26,7 @@ fn main() {
     println!(
         "fn[{big}] ({} insns) decompiled to {} lines in {:?}",
         l.fns[big].len(),
-        c.lines().count(),
+        c.0.lines().count(),
         t1.elapsed()
     );
 }

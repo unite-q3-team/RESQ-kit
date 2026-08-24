@@ -1686,7 +1686,11 @@ pub fn reachable_blocks(f: &Function) -> Vec<bool> {
 }
 
 /// Render a decompiled function as C.
-pub fn fmt_function(f: &Function, q: &Qvm) -> String {
+/// One formatted C line plus the instruction range it was produced from.
+pub type FmtLine = (String, (usize, usize));
+
+/// Formatted identity C with a per-line -> insn-range map (for GUI sync).
+pub fn fmt_function_lines(f: &Function, q: &Qvm) -> Vec<FmtLine> {
     let reach = reachable_blocks(f);
     let mut assigned: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for b in &f.blocks {
@@ -1696,17 +1700,21 @@ pub fn fmt_function(f: &Function, q: &Qvm) -> String {
             }
         }
     }
-    let mut out = String::new();
-    out.push_str(&format!(
-        "// function @ insn {}..{} frame {}\n",
-        f.start, f.end, f.frame
-    ));
-    out.push_str("void fn() {\n");
+    let whole = (f.start, f.end);
+    let mut lines: Vec<FmtLine> = Vec::new();
+    let mut out = |text: String, range: (usize, usize)| lines.push((text, range));
+    out(
+        format!("// function @ insn {}..{} frame {}", f.start, f.end, f.frame),
+        whole,
+    );
+    out("void fn() {".to_string(), whole);
     for (bi, b) in f.blocks.iter().enumerate() {
         if !reach[bi] {
             continue;
         }
-        out.push_str(&format!("L{}:\n", b.start));
+        let end = f.blocks.get(bi + 1).map_or(f.end, |nb| nb.start).max(b.start);
+        let span = (b.start, end);
+        out(format!("L{}:", b.start), (b.start, end));
         for st in &b.body {
             match st {
                 Stmt::Assign { slot, value } => {
@@ -1714,26 +1722,29 @@ pub fn fmt_function(f: &Function, q: &Qvm) -> String {
                     if !f.read_slots.contains(slot) {
                         match value {
                             Expr::Call(..) | Expr::Trap(..) => {
-                                out.push_str(&format!("  {rhs};\n"));
+                                out(format!("  {rhs};"), span);
                             }
                             _ => continue, // pure, dead slot write
                         }
                     } else {
-                        out.push_str(&format!("  s{slot} = {rhs};\n"));
+                        out(format!("  s{slot} = {rhs};"), span);
                     }
                 }
                 Stmt::Store { addr, value, size } => {
                     let v = fmt_expr(q, f.frame, value);
                     let store_lhs = store_lhs(q, f.frame, addr, *size);
-                    out.push_str(&format!("  {store_lhs} = {v};\n"));
+                    out(format!("  {store_lhs} = {v};"), span);
                 }
                 Stmt::BlockCopy { dest, src, count } => {
-                    out.push_str(&format!(
-                        "  memcpy((void*)({}), (const void*)({}), {});\n",
-                        fmt_expr(q, f.frame, dest),
-                        fmt_expr(q, f.frame, src),
-                        count
-                    ));
+                    out(
+                        format!(
+                            "  memcpy((void*)({}), (const void*)({}), {});",
+                            fmt_expr(q, f.frame, dest),
+                            fmt_expr(q, f.frame, src),
+                            count
+                        ),
+                        span,
+                    );
                 }
             }
         }
@@ -1742,24 +1753,21 @@ pub fn fmt_function(f: &Function, q: &Qvm) -> String {
                 // an unassigned slot is the PUSH dummy of a void return
                 let is_dummy = matches!(v, Expr::Slot(s) if !assigned.contains(s));
                 if is_dummy {
-                    out.push_str("  return;\n");
+                    out("  return;".to_string(), span);
                 } else {
-                    out.push_str(&format!("  return {};\n", fmt_expr(q, f.frame, v)));
+                    out(format!("  return {};", fmt_expr(q, f.frame, v)), span);
                 }
             }
-            Terminator::Return(None) => out.push_str("  return;\n"),
-            Terminator::Goto(t) => out.push_str(&format!("  goto L{t};\n")),
+            Terminator::Return(None) => out("  return;".to_string(), span),
+            Terminator::Goto(t) => out(format!("  goto L{t};"), span),
             Terminator::IfGoto { cond, target } => {
-                out.push_str(&format!(
-                    "  if ({}) goto L{target};\n",
-                    fmt_expr(q, f.frame, cond)
-                ));
+                out(format!("  if ({}) goto L{target};", fmt_expr(q, f.frame, cond)), span);
             }
             Terminator::Unresolved(a) => {
-                out.push_str(&format!(
-                    "  goto /* indirect */ ({});\n",
-                    fmt_expr(q, f.frame, a)
-                ));
+                out(
+                    format!("  goto /* indirect */ ({});", fmt_expr(q, f.frame, a)),
+                    span,
+                );
             }
             Terminator::Switch {
                 sel,
@@ -1781,23 +1789,30 @@ pub fn fmt_function(f: &Function, q: &Qvm) -> String {
                         None
                     }
                 });
-                out.push_str(&format!("  switch ({}) {{\n", fmt_expr(q, f.frame, sel)));
+                out(format!("  switch ({}) {{", fmt_expr(q, f.frame, sel)), span);
                 for (v, t) in cases {
                     if default_target == Some(*t) {
                         continue;
                     }
-                    out.push_str(&format!("  case {v}: goto L{t};\n"));
+                    out(format!("  case {v}: goto L{t};"), span);
                 }
                 if let Some(t) = default_target {
-                    out.push_str(&format!("  default: goto L{t};\n"));
+                    out(format!("  default: goto L{t};"), span);
                 }
-                out.push_str("  }\n");
+                out("  }".to_string(), span);
             }
             Terminator::Fallthrough => {}
         }
     }
-    out.push_str("}\n");
-    out
+    out("}\n".to_string(), whole);
+    lines
+}
+
+pub fn fmt_function(f: &Function, q: &Qvm) -> String {
+    fmt_function_lines(f, q)
+        .into_iter()
+        .map(|(text, _)| text + "\n")
+        .collect()
 }
 
 /// Left-hand side of a store: `*addr` in the right width.

@@ -3,9 +3,11 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use qvm::{disassemble, load, load_map, trap_name, Disassembly, Insn, Opcode, Qvm};
+
+/// Cached decompilation: text + per-line insn-range map.
+pub type DecompileCache = (std::sync::Arc<str>, std::sync::Arc<[(usize, usize)]>);
 
 /// Raw bytecode bytes of one instruction, hex formatted (`0C FF FF FF FF`).
 pub fn insn_bytes(ins: &Insn) -> String {
@@ -36,6 +38,73 @@ pub fn escape(s: &str) -> String {
         }
     }
     out
+}
+
+/// Short human-readable description of an opcode (for hover tooltips).
+pub fn opcode_help(op: Opcode) -> &'static str {
+    use Opcode::*;
+    match op {
+        Undef => "undefined opcode",
+        Ignore => "no-op, ignored by the interpreter",
+        Break => "VM breakpoint (debugger trap)",
+        Enter => "function prologue: allocate stack frame (operand = frame size)",
+        Leave => "function epilogue: free frame and return to caller",
+        Call => "call function: address popped from stack (syscall if negative)",
+        Push => "push top of opstack onto the call stack",
+        Pop => "discard the value popped from the call stack",
+        Const => "push 32-bit constant (operand); often an address or syscall num",
+        Local => "push address of a local: programStack + frame + operand",
+        Jump => "indirect jump: target address popped from stack",
+        Eq => "pop a, b; if a == b jump to target",
+        Ne => "pop a, b; if a != b jump to target",
+        Lti => "pop a, b; if a < b (signed) jump to target",
+        Lei => "pop a, b; if a <= b (signed) jump to target",
+        Gti => "pop a, b; if a > b (signed) jump to target",
+        Gei => "pop a, b; if a >= b (signed) jump to target",
+        Ltu => "pop a, b; if a < b (unsigned) jump to target",
+        Leu => "pop a, b; if a <= b (unsigned) jump to target",
+        Gtu => "pop a, b; if a > b (unsigned) jump to target",
+        Geu => "pop a, b; if a >= b (unsigned) jump to target",
+        Eqf => "pop float a, b; if a == b jump to target",
+        Nef => "pop float a, b; if a != b jump to target",
+        Ltf => "pop float a, b; if a < b jump to target",
+        Lef => "pop float a, b; if a <= b jump to target",
+        Gtf => "pop float a, b; if a > b jump to target",
+        Gef => "pop float a, b; if a >= b jump to target",
+        Load1 => "read 1 byte from memory at address on stack top",
+        Load2 => "read 2 bytes (u16) from memory",
+        Load4 => "read 4 bytes (i32) from memory",
+        Store1 => "pop value, addr; write lowest byte to memory",
+        Store2 => "pop value, addr; write 2 bytes to memory",
+        Store4 => "pop value, addr; write 4 bytes to memory",
+        Arg => "marshal argument: copy from opstack to call stack area (operand = offset)",
+        BlockCopy => "pop count, src, dest; copy a block of memory",
+        Sex8 => "sign-extend lowest byte to 32 bits",
+        Sex16 => "sign-extend lowest 16 bits to 32 bits",
+        Negi => "negate integer on stack top",
+        Add => "pop a, b; push a + b",
+        Sub => "pop a, b; push a - b",
+        Divi => "pop a, b; push a / b (signed)",
+        Divu => "pop a, b; push a / b (unsigned)",
+        Modi => "pop a, b; push a % b (signed)",
+        Modu => "pop a, b; push a % b (unsigned)",
+        Muli => "pop a, b; push a * b",
+        Mulu => "pop a, b; push a * b (unsigned low 32 bits)",
+        Band => "pop a, b; push a & b",
+        Bor => "pop a, b; push a | b",
+        Bxor => "pop a, b; push a ^ b",
+        Bcom => "bitwise NOT (~a) of stack top",
+        Lsh => "pop a, b; push a << b",
+        Rshi => "pop a, b; push a >> b (arithmetic)",
+        Rshu => "pop a, b; push a >> b (logical)",
+        Negf => "negate float on stack top",
+        AddF => "pop float a, b; push a + b",
+        SubF => "pop float a, b; push a - b",
+        DivF => "pop float a, b; push a / b",
+        MulF => "pop float a, b; push a * b",
+        Cvif => "convert int to float",
+        Cvfi => "convert float to int (truncating)",
+    }
 }
 
 /// Per-function metadata collected at load time (mirrors `probe_inventory`).
@@ -109,6 +178,10 @@ pub struct Loaded {
     pub callgraph: CallGraph,
     /// `(entry, end)` per fn index, precomputed for pane tinting.
     pub fn_ranges: Vec<(usize, usize)>,
+    /// BSS segment (globals): [start, end) in VM memory.
+    pub bss_range: (i32, i32),
+    /// BSS address referenced by CONST -> functions referencing it.
+    pub bss_refs: BTreeMap<i32, Vec<usize>>,
 }
 
 impl Loaded {
@@ -327,6 +400,28 @@ impl Loaded {
 
         let fn_ranges: Vec<(usize, usize)> = fns.iter().map(|f| (f.entry, f.end)).collect();
 
+        // BSS explorer: CONST operands pointing into the BSS segment.
+        let bss_range = (
+            qvm.data_length + qvm.lit_length,
+            qvm.data_length + qvm.lit_length + qvm.bss_length,
+        );
+        let mut bss_refs: BTreeMap<i32, std::collections::BTreeSet<usize>> = BTreeMap::new();
+        for (idx, &(start, end)) in ranges.iter().enumerate() {
+            for ins in &d.insns[start..end] {
+                if ins.op != Opcode::Const {
+                    continue;
+                }
+                let Some(opd) = ins.operand else { continue };
+                if opd >= bss_range.0 && opd < bss_range.1 {
+                    bss_refs.entry(opd).or_default().insert(idx);
+                }
+            }
+        }
+        let bss_refs: BTreeMap<i32, Vec<usize>> = bss_refs
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect()))
+            .collect();
+
         Ok(Loaded {
             path: path.to_path_buf(),
             qvm,
@@ -343,6 +438,8 @@ impl Loaded {
             trap_names,
             callgraph: cg,
             fn_ranges,
+            bss_range,
+            bss_refs,
         })
     }
 
@@ -382,13 +479,22 @@ impl Loaded {
     }
 
     /// Decompiled identity C for one function (uncached; the GUI caches).
-    pub fn decompile(&self, idx: usize) -> Result<Arc<str>, String> {
+    /// Returns the text plus a per-line insn-range map for pane sync.
+    pub fn decompile(&self, idx: usize) -> Result<DecompileCache, String> {
         let f = self.fns.get(idx).ok_or("bad fn index")?;
         let data = self.qvm.data_int32();
         let cfg = qvm::build_cfg(&self.d, (f.entry, f.end), &data).ok_or("degenerate CFG")?;
         let frame = self.d.insns[cfg.entry].operand.unwrap_or(0);
         let fun = qvm::decompile_function(&self.d, &cfg, frame, &data);
-        Ok(qvm::fmt_function(&fun, &self.qvm).into())
+        let lines = qvm::fmt_function_lines(&fun, &self.qvm);
+        let text: String = lines
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let map: Vec<(usize, usize)> = lines.into_iter().map(|(_, r)| r).collect();
+        Ok((text.into(), map.into()))
     }
 
     /// Disasm pane slice for one function (instruction-index range).
