@@ -170,13 +170,26 @@ const PERSIST_KEY: &str = "resq_gui_state_v1";
 /// by eframe itself once the `persistence` feature is enabled.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistState {
+    #[serde(default)]
     path_edit: String,
+    #[serde(default)]
     filter: String,
+    #[serde(default)]
     strings_filter: String,
+    #[serde(default)]
     bss_filter: String,
-    sync_scroll: bool,
+    #[serde(default)]
     center: u8,
+    #[serde(default)]
     tab: u8,
+}
+
+/// Decode an embedded PNG into straight-alpha RGBA pixels (window icons).
+/// For textures, feed the result through `ColorImage::from_rgba_unmultiplied`.
+pub fn decode_png_rgba(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+    let img = image::load_from_memory(bytes).expect("decode embedded png");
+    let rgba = img.to_rgba8();
+    (rgba.width(), rgba.height(), rgba.into_raw())
 }
 
 /// Keyboard-only access to a graph canvas: arrows pan, `+`/`-` zoom around
@@ -193,7 +206,9 @@ fn canvas_keys(ui: &egui::Ui, cam: &mut Cam, rect: &egui::Rect, lo: f32, hi: f32
         egui::vec2((r as i32 - l as i32) as f32, (dn as i32 - u as i32) as f32)
     });
     if d != egui::Vec2::ZERO {
-        cam.pan += d * (48.0 / cam.zoom);
+        // Arrow = move the camera in that direction: the content shifts the
+        // opposite way, like scrolling a map.
+        cam.pan -= d * (48.0 / cam.zoom);
     }
     let (zoom_in, zoom_out, fit) = ui.input(|i| {
         (
@@ -316,12 +331,6 @@ pub struct App {
     /// Navigation history (back / forward), bounded.
     hist: Vec<usize>,
     hist_fwd: Vec<usize>,
-    /// Scroll sync between Disasm and Identity C.
-    sync_scroll: bool,
-    sync_to_d: Option<f32>,
-    sync_to_c: Option<f32>,
-    prev_d: f32,
-    prev_c: f32,
     /// Floating memory hex-dump windows (one per requested address).
     hex_windows: Vec<HexReq>,
     /// Cached filtered rows of the function list: `(needle, gen, rows)`.
@@ -336,6 +345,8 @@ pub struct App {
     loading_path: Option<String>,
     /// Receiver of the in-flight async export status message.
     export_rx: Option<std::sync::mpsc::Receiver<String>>,
+    /// Cached RESQ logo texture (loaded once, shown in the top bar / Help).
+    logo: Option<egui::TextureHandle>,
     /// Last window title set (avoids per-frame ViewportCommand spam).
     title: Option<String>,
 }
@@ -372,11 +383,6 @@ impl App {
             img_colw: Vec::new(),
             hist: Vec::new(),
             hist_fwd: Vec::new(),
-            sync_scroll: false,
-            sync_to_d: None,
-            sync_to_c: None,
-            prev_d: 0.0,
-            prev_c: 0.0,
             hex_windows: Vec::new(),
             fn_rows: None,
             gen: 0,
@@ -384,6 +390,7 @@ impl App {
             load_rx: None,
             loading_path: None,
             export_rx: None,
+            logo: None,
             title: None,
         };
         // Restore persisted settings; a CLI path overrides the stored one.
@@ -395,7 +402,6 @@ impl App {
                     app.filter = s.filter;
                     app.strings_filter = s.strings_filter;
                     app.bss_filter = s.bss_filter;
-                    app.sync_scroll = s.sync_scroll;
                     app.center = CenterTab::from_u8(s.center);
                     app.tab = BottomTab::from_u8(s.tab);
                 }
@@ -418,7 +424,6 @@ impl App {
             filter: self.filter.clone(),
             strings_filter: self.strings_filter.clone(),
             bss_filter: self.bss_filter.clone(),
-            sync_scroll: self.sync_scroll,
             center: self.center.as_u8(),
             tab: self.tab.as_u8(),
         }
@@ -474,8 +479,6 @@ impl App {
         self.cfg_drag = None;
         self.cam_cfg = Cam::default();
         self.hex_windows.clear();
-        self.sync_to_d = None;
-        self.sync_to_c = None;
         self.loaded = Some(l);
     }
 
@@ -872,8 +875,24 @@ impl App {
     }
 
     fn top_bar(&mut self, ctx: &egui::Context) {
+        // RESQ logo (embedded at compile time), lazily uploaded as a texture.
+        if self.logo.is_none() {
+            let (w, h, rgba) = decode_png_rgba(include_bytes!("../../../assets/resq-logo.png"));
+            let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+            self.logo = Some(ctx.load_texture("resq-logo", color, egui::TextureOptions::LINEAR));
+        }
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                if let Some(tex) = &self.logo {
+                    let size = tex.size_vec2();
+                    let h = 20.0;
+                    ui.add(
+                        egui::Image::new(tex)
+                            .fit_to_exact_size(egui::vec2(size.x * (h / size.y), h)),
+                    )
+                    .on_hover_text("RESQ kit — Restore Everything from Stale QVM");
+                    ui.separator();
+                }
                 // ---- File ------------------------------------------------
                 ui.menu_button("File", |ui| {
                     if ui
@@ -976,6 +995,15 @@ impl App {
 
                 // ---- Help ------------------------------------------------
                 ui.menu_button("Help", |ui| {
+                    if let Some(tex) = &self.logo {
+                        let size = tex.size_vec2();
+                        let h = 44.0;
+                        ui.add(
+                            egui::Image::new(tex)
+                                .fit_to_exact_size(egui::vec2(size.x * (h / size.y), h)),
+                        );
+                        ui.separator();
+                    }
                     ui.strong("Shortcuts");
                     for (keys, what) in [
                         ("Ctrl+O", "open a QVM via the file dialog"),
@@ -1037,9 +1065,6 @@ impl App {
                 {
                     self.go_forward();
                 }
-                ui.separator();
-                ui.add(egui::Checkbox::new(&mut self.sync_scroll, "Sync scroll"))
-                    .on_hover_text("Scroll Disassembly and Identity C together (by fraction)");
                 ui.separator();
                 if self.busy() {
                     let tip = match &self.loading_path {
@@ -1539,13 +1564,6 @@ impl App {
             let mut flash_loc: Option<usize> = None;
             let mut c_goto_loc: Option<usize> = None;
             let scroll_req: Option<usize> = self.scroll_to.take();
-            let sync_to_d = self.sync_to_d.take();
-            let sync_to_c = self.sync_to_c.take();
-            let prev_d = self.prev_d;
-            let prev_c = self.prev_c;
-            let sync = self.sync_scroll;
-            let mut d_now = 0.0f32;
-            let mut c_now = 0.0f32;
             let mut pending_scroll: Option<usize> = None;
 
             match self.center {
@@ -1560,10 +1578,7 @@ impl App {
                             sa = sa.vertical_scroll_offset((t - range.start) as f32 * mono_h);
                         }
                     }
-                    if let Some(y) = sync_to_d {
-                        sa = sa.vertical_scroll_offset(y);
-                    }
-                    let d_out = sa.show_rows(&mut cols[0], mono_h, range.len(), |ui, rows| {
+                    let _d_out = sa.show_rows(&mut cols[0], mono_h, range.len(), |ui, rows| {
                         for i in rows {
                             let ii = range.start + i;
                             // The row rect must be captured BEFORE the row is
@@ -1617,7 +1632,6 @@ impl App {
                                 .on_hover_text(help);
                         }
                     });
-                    d_now = d_out.state.offset.y;
 
                     // ---- right: decompiled C -------------------------------
                     cols[1].heading("Identity C");
@@ -1625,15 +1639,12 @@ impl App {
                     let mut sac = egui::ScrollArea::vertical()
                         .id_salt("decomp")
                         .auto_shrink([false, false]);
-                    if let Some(y) = sync_to_c {
-                        sac = sac.vertical_scroll_offset(y);
-                    }
                     if let Some(n) = c_scroll_line {
                         if let Some(&li) = dec.labels.get(&n) {
                             sac = sac.vertical_scroll_offset(li as f32 * mono_h);
                         }
                     }
-                    let c_out = sac.show_rows(&mut cols[1], mono_h, c_rows.len(), |ui, rows| {
+                    let _c_out = sac.show_rows(&mut cols[1], mono_h, c_rows.len(), |ui, rows| {
                         for i in rows {
                             // Row rect captured before rendering (see disasm).
                             let row = egui::Rect::from_min_size(
@@ -1671,7 +1682,6 @@ impl App {
                             }
                         }
                     });
-                    c_now = c_out.state.offset.y;
                 }),
                 CenterTab::DGraph | CenterTab::Graph => match cfg_res {
                     Some(Ok(cfg)) => cfg_canvas(
@@ -1707,19 +1717,6 @@ impl App {
                     }
                 },
             }
-
-            // Fraction-based scroll sync (one frame lag, damped).
-            if self.center == CenterTab::Code && sync {
-                let d_h = range.len() as f32 * mono_h;
-                let c_h = text.lines().count() as f32 * mono_h;
-                if (d_now - prev_d).abs() > 0.5 {
-                    self.sync_to_c = Some(d_now / d_h.max(1.0) * c_h);
-                } else if (c_now - prev_c).abs() > 0.5 {
-                    self.sync_to_d = Some(c_now / c_h.max(1.0) * d_h);
-                }
-            }
-            self.prev_d = d_now;
-            self.prev_c = c_now;
 
             // Apply collected actions.
             self.hover_fn = new_hover_fn;
@@ -2192,9 +2189,9 @@ fn draw_edge(
     });
     let dir = if to.x > from.x { -1.0 } else { 1.0 };
     let pts = vec![
-        egui::Pos2::new(to.x + 5.0 * dir * arrow_s, to.y),
-        egui::Pos2::new(to.x - 3.0 * dir * arrow_s, to.y - 3.5 * arrow_s),
-        egui::Pos2::new(to.x - 3.0 * dir * arrow_s, to.y + 3.5 * arrow_s),
+        egui::Pos2::new(to.x + 7.0 * dir * arrow_s, to.y),
+        egui::Pos2::new(to.x - 4.0 * dir * arrow_s, to.y - 5.0 * arrow_s),
+        egui::Pos2::new(to.x - 4.0 * dir * arrow_s, to.y + 5.0 * arrow_s),
     ];
     p.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
 }
@@ -2280,14 +2277,23 @@ fn image_graph_pane(
             H
         }
     };
-    let base_pos = |i: usize| -> egui::Vec2 {
-        egui::Vec2::new(col_x(cg.depth[i]), M + cg.row[i] as f32 * (H + GY))
-    };
+    // Stack each column by real node height (name + stats + preview lines).
+    // A fixed `row * (H + GY)` grid made taller nodes overlap their neighbors.
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| (cg.depth[i], cg.row[i]));
+    let mut col_y = vec![M; cg.max_depth + 1];
+    let mut base_y = vec![M; n];
+    for &i in &order {
+        let d = cg.depth[i];
+        base_y[i] = col_y[d];
+        col_y[d] += H + prev_lines(i) as f32 * LINE_H + GY;
+    }
+    let base_pos = |i: usize| -> egui::Vec2 { egui::Vec2::new(col_x(cg.depth[i]), base_y[i]) };
     let pos = |offs: &HashMap<usize, egui::Vec2>, i: usize| -> egui::Vec2 {
         base_pos(i) + offs.get(&i).copied().unwrap_or_default()
     };
     let total_w = M + img_colw.iter().sum::<f32>() + cg.max_depth as f32 * GX;
-    let total_h = M + cg.col_len.iter().copied().max().unwrap_or(1) as f32 * (H + GY);
+    let total_h = col_y.iter().copied().fold(M, f32::max);
 
     let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     let p = ui.painter_at(rect);
@@ -2345,8 +2351,9 @@ fn image_graph_pane(
         *drag = None;
     }
 
-    // Edges (caller -> callee), culled.
-    let edge_color = Color32::from_rgba_unmultiplied(110, 118, 128, 140);
+    // Edges (caller -> callee), culled. Bright enough to read on the dark
+    // background at any zoom.
+    let edge_color = Color32::from_rgba_unmultiplied(152, 162, 180, 220);
     if cam.zoom >= 0.08 {
         for (caller, callees_list) in &l.callees {
             let a = cam.to_screen(
@@ -2356,7 +2363,7 @@ fn image_graph_pane(
             for &t in callees_list {
                 let b = cam.to_screen(rect.min, pos(offsets, t));
                 let b = egui::Pos2::new(b.x, b.y + node_h(t, cam.zoom) / 2.0);
-                draw_edge(&p, a, b, rect, edge_color, 1.0, 1.0);
+                draw_edge(&p, a, b, rect, edge_color, 1.6, 1.0);
             }
         }
     }
@@ -2842,7 +2849,6 @@ mod tests {
             filter: "trap_\"x\"".into(),
             strings_filter: "привет".into(),
             bss_filter: "".into(),
-            sync_scroll: true,
             center: CenterTab::Graph.as_u8(),
             tab: BottomTab::Xrefs.as_u8(),
         };
@@ -2851,8 +2857,13 @@ mod tests {
         assert_eq!(back.path_edit, s.path_edit);
         assert_eq!(back.filter, s.filter);
         assert_eq!(back.strings_filter, s.strings_filter);
-        assert_eq!(back.sync_scroll, s.sync_scroll);
-        assert_eq!(CenterTab::from_u8(back.center), CenterTab::Graph,);
+        assert_eq!(CenterTab::from_u8(back.center), CenterTab::Graph);
         assert_eq!(BottomTab::from_u8(back.tab), BottomTab::Xrefs);
+
+        // Blobs from older versions (extra/missing fields) still load.
+        let legacy = r#"{"path_edit":"a.qvm","filter":"","strings_filter":"",
+            "bss_filter":"","sync_scroll":true,"center":0,"tab":2}"#;
+        let old: PersistState = serde_json::from_str(legacy).expect("legacy blob");
+        assert_eq!(BottomTab::from_u8(old.tab), BottomTab::Xrefs);
     }
 }

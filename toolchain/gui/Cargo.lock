@@ -2643,6 +2643,7 @@ name = "resq-gui"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "image",
  "qvm",
  "rfd",
  "serde",
