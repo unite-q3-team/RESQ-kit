@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/resq-logo.png" alt="RESQ kit logo" width="180">
+  <img src="assets/resq-logo.png" alt="RESQ kit logo">
 
 # RESQ kit — погрузитесь в любой Quake 3 QVM. Анализируйте, декомпилируйте, пересобирайте.
 
@@ -8,9 +8,7 @@
 ![rust](https://img.shields.io/badge/made%20with-Rust-dea584?logo=rust)
 ![python](https://img.shields.io/badge/made%20with-Python%203-3776AB?logo=python&logoColor=white)
 ![target](https://img.shields.io/badge/target-id%20Tech%203%20QVM-red)
-
 </div>
-
 > Перевод [README.md](README.md); при расхождениях приоритет у английского оригинала.
 
 **R**estore **E**verything from **S**tale **Q**VM. (Восстановить всё из залежавшегося QVM)

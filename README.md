@@ -1,4 +1,5 @@
-![RESQ kit logo](assets/resq-logo.png)
+<div align="center">
+  <img src="assets/resq-logo.png" alt="RESQ kit logo">
 
 # RESQ kit — dive into any Quake 3 QVM. Analyze, decompile, rebuild.
 
@@ -8,7 +9,7 @@
 ![python](https://img.shields.io/badge/made%20with-Python%203-3776AB?logo=python&logoColor=white)
 ![target](https://img.shields.io/badge/target-id%20Tech%203%20QVM-red)
 
-
+</div>
 
 **R**estore **E**verything from **S**tale **Q**VM.
 
