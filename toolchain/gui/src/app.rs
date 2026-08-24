@@ -18,7 +18,7 @@ const C_CACHE_CAP: usize = 128;
 /// Duration of the flash highlight after a jump, seconds.
 const FLASH_SECS: f32 = 0.9;
 
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
 enum BottomTab {
     #[default]
     Strings,
@@ -28,13 +28,53 @@ enum BottomTab {
     Info,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+impl BottomTab {
+    fn as_u8(self) -> u8 {
+        match self {
+            BottomTab::Strings => 0,
+            BottomTab::Traps => 1,
+            BottomTab::Xrefs => 2,
+            BottomTab::Bss => 3,
+            BottomTab::Info => 4,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => BottomTab::Traps,
+            2 => BottomTab::Xrefs,
+            3 => BottomTab::Bss,
+            4 => BottomTab::Info,
+            _ => BottomTab::Strings,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum CenterTab {
     Code,
     /// Disassembly graph: CFG of the selected function (IF/branches).
     DGraph,
     /// Whole-image call graph.
     Graph,
+}
+
+impl CenterTab {
+    fn as_u8(self) -> u8 {
+        match self {
+            CenterTab::Code => 0,
+            CenterTab::DGraph => 1,
+            CenterTab::Graph => 2,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => CenterTab::DGraph,
+            2 => CenterTab::Graph,
+            _ => CenterTab::Code,
+        }
+    }
 }
 
 /// Request for the floating memory hex-dump window.
@@ -93,10 +133,22 @@ impl Cam {
             return;
         }
         let k = (delta * 0.0015).clamp(-0.25, 0.25);
+        self.zoom_about(rect.min, pointer, 1.0 + k, lo, hi);
+    }
+
+    /// Multiplicative zoom around a screen-space anchor point.
+    fn zoom_about(
+        &mut self,
+        rect_min: egui::Pos2,
+        anchor: egui::Pos2,
+        factor: f32,
+        lo: f32,
+        hi: f32,
+    ) {
         let old = self.zoom;
-        self.zoom = (old * (1.0 + k)).clamp(lo, hi);
-        let world = (pointer - rect.min - self.pan) / old;
-        self.pan = pointer - rect.min - world * self.zoom;
+        self.zoom = (old * factor).clamp(lo, hi);
+        let world = (anchor - rect_min - self.pan) / old;
+        self.pan = anchor - rect_min - world * self.zoom;
     }
 
     /// World -> screen transform.
@@ -107,6 +159,59 @@ impl Cam {
 
 /// Cached filtered rows of the function list: `(needle, generation, rows)`.
 type FnRowsCache = Option<(String, u64, Arc<Vec<(usize, String)>>)>;
+
+// ---------------------------------------------------------------------------
+// Persistence (restored between launches via eframe storage)
+// ---------------------------------------------------------------------------
+
+const PERSIST_KEY: &str = "resq_gui_state_v1";
+
+/// Settings that survive an app restart. Window size/position are persisted
+/// by eframe itself once the `persistence` feature is enabled.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistState {
+    path_edit: String,
+    filter: String,
+    strings_filter: String,
+    bss_filter: String,
+    sync_scroll: bool,
+    center: u8,
+    tab: u8,
+}
+
+/// Keyboard-only access to a graph canvas: arrows pan, `+`/`-` zoom around
+/// the canvas center, `F` fits the graph to the window.
+fn canvas_keys(ui: &egui::Ui, cam: &mut Cam, rect: &egui::Rect, lo: f32, hi: f32) {
+    if ui.ctx().wants_keyboard_input() {
+        return;
+    }
+    let d = ui.input(|i| {
+        let l = i.key_pressed(egui::Key::ArrowLeft);
+        let r = i.key_pressed(egui::Key::ArrowRight);
+        let u = i.key_pressed(egui::Key::ArrowUp);
+        let dn = i.key_pressed(egui::Key::ArrowDown);
+        egui::vec2((r as i32 - l as i32) as f32, (dn as i32 - u as i32) as f32)
+    });
+    if d != egui::Vec2::ZERO {
+        cam.pan += d * (48.0 / cam.zoom);
+    }
+    let (zoom_in, zoom_out, fit) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::Plus),
+            i.key_pressed(egui::Key::Minus),
+            i.key_pressed(egui::Key::F),
+        )
+    });
+    if zoom_in {
+        cam.zoom_about(rect.min, rect.center(), 1.3, lo, hi);
+    }
+    if zoom_out {
+        cam.zoom_about(rect.min, rect.center(), 1.0 / 1.3, lo, hi);
+    }
+    if fit {
+        cam.fit = true;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Syntax palette (dark-theme friendly)
@@ -225,15 +330,21 @@ pub struct App {
     gen: u64,
     /// Scroll the selected row of the function list into view (arrow keys).
     fn_ensure_visible: bool,
+    /// Receiver of the in-flight async `Loaded::open` result.
+    load_rx: Option<std::sync::mpsc::Receiver<Result<Loaded, String>>>,
+    /// Path being loaded (shown while busy).
+    loading_path: Option<String>,
+    /// Receiver of the in-flight async export status message.
+    export_rx: Option<std::sync::mpsc::Receiver<String>>,
     /// Last window title set (avoids per-frame ViewportCommand spam).
     title: Option<String>,
 }
 
 impl App {
-    pub fn new(initial: Option<String>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<String>) -> Self {
         let mut app = App {
             loaded: None,
-            path_edit: initial.unwrap_or_default(),
+            path_edit: String::new(),
             filter: String::new(),
             strings_filter: String::new(),
             bss_filter: String::new(),
@@ -270,50 +381,152 @@ impl App {
             fn_rows: None,
             gen: 0,
             fn_ensure_visible: false,
+            load_rx: None,
+            loading_path: None,
+            export_rx: None,
             title: None,
         };
+        // Restore persisted settings; a CLI path overrides the stored one.
+        if let Some(storage) = cc.storage {
+            if let Some(json) = storage.get_string(PERSIST_KEY) {
+                // A stale/corrupt blob simply means a fresh start.
+                if let Ok(s) = serde_json::from_str::<PersistState>(&json) {
+                    app.path_edit = s.path_edit;
+                    app.filter = s.filter;
+                    app.strings_filter = s.strings_filter;
+                    app.bss_filter = s.bss_filter;
+                    app.sync_scroll = s.sync_scroll;
+                    app.center = CenterTab::from_u8(s.center);
+                    app.tab = BottomTab::from_u8(s.tab);
+                }
+            }
+        }
+        if let Some(p) = initial {
+            app.path_edit = p;
+        }
         if !app.path_edit.is_empty() {
-            app.load_path(&app.path_edit.clone());
+            let p = app.path_edit.clone();
+            app.load_path(&p);
         }
         app
     }
 
-    pub fn load_path(&mut self, path: &str) {
-        match Loaded::open(std::path::Path::new(path)) {
-            Ok(l) => {
-                let n = l.fns.len();
-                let insns = l.lines.len();
-                self.status = format!(
-                    "{}: {n} functions, {insns} instructions, {} lit strings",
-                    l.path.display(),
-                    l.lit_strings.len()
-                );
-                self.selected = Some(0);
-                self.rename_buf.clear();
-                self.c_cache.clear();
-                self.c_order.clear();
-                self.fn_rows = None;
-                self.scroll_to = l.fns.first().map(|f| f.entry);
-                self.hover_fn = None;
-                self.c_hover_range = None;
-                self.img_w.clear();
-                self.img_colw.clear();
-                self.cam_graph.fit = true;
-                self.hist.clear();
-                self.hist_fwd.clear();
-                self.graph_focus = Some(l.entry_fn());
-                self.img_offsets.clear();
-                self.cfg_offsets.clear();
-                self.img_drag = None;
-                self.cfg_drag = None;
-                self.cam_cfg = Cam::default();
-                self.hex_windows.clear();
-                self.sync_to_d = None;
-                self.sync_to_c = None;
-                self.loaded = Some(l);
-            }
-            Err(e) => self.status = e,
+    /// Snapshot of the settings persisted across launches.
+    fn persist_state(&self) -> PersistState {
+        PersistState {
+            path_edit: self.path_edit.clone(),
+            filter: self.filter.clone(),
+            strings_filter: self.strings_filter.clone(),
+            bss_filter: self.bss_filter.clone(),
+            sync_scroll: self.sync_scroll,
+            center: self.center.as_u8(),
+            tab: self.tab.as_u8(),
         }
+    }
+
+    /// Request an async load: the file is parsed on a background thread so
+    /// the UI stays responsive; the result is polled in `update`.
+    pub fn load_path(&mut self, path: &str) {
+        if self.load_rx.is_some() {
+            self.status = "already loading a file…".into();
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p = path.to_string();
+        self.status = format!("loading {}…", path);
+        self.loading_path = Some(p.clone());
+        std::thread::Builder::new()
+            .name("resq-load".into())
+            .spawn(move || {
+                let res = Loaded::open(std::path::Path::new(&p));
+                let _ = tx.send(res);
+            })
+            .expect("spawn loader thread");
+        self.load_rx = Some(rx);
+    }
+
+    /// Apply a freshly loaded image: reset per-image view state.
+    fn apply_loaded(&mut self, l: Loaded) {
+        let n = l.fns.len();
+        let insns = l.lines.len();
+        self.status = format!(
+            "{}: {n} functions, {insns} instructions, {} lit strings",
+            l.path.display(),
+            l.lit_strings.len()
+        );
+        self.selected = Some(0);
+        self.rename_buf.clear();
+        self.c_cache.clear();
+        self.c_order.clear();
+        self.fn_rows = None;
+        self.scroll_to = l.fns.first().map(|f| f.entry);
+        self.hover_fn = None;
+        self.c_hover_range = None;
+        self.img_w.clear();
+        self.img_colw.clear();
+        self.cam_graph.fit = true;
+        self.hist.clear();
+        self.hist_fwd.clear();
+        self.graph_focus = Some(l.entry_fn());
+        self.img_offsets.clear();
+        self.cfg_offsets.clear();
+        self.img_drag = None;
+        self.cfg_drag = None;
+        self.cam_cfg = Cam::default();
+        self.hex_windows.clear();
+        self.sync_to_d = None;
+        self.sync_to_c = None;
+        self.loaded = Some(l);
+    }
+
+    /// Non-blocking poll of the background load / export threads.
+    fn poll_threads(&mut self, ctx: &egui::Context) {
+        let mut repaint = false;
+        if let Some(rx) = &self.load_rx {
+            match rx.try_recv() {
+                Ok(Ok(l)) => {
+                    self.load_rx = None;
+                    self.loading_path = None;
+                    self.apply_loaded(l);
+                    repaint = true;
+                }
+                Ok(Err(e)) => {
+                    self.load_rx = None;
+                    self.loading_path = None;
+                    self.status = e;
+                    repaint = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.load_rx = None;
+                    self.loading_path = None;
+                }
+            }
+        }
+        if let Some(rx) = &self.export_rx {
+            match rx.try_recv() {
+                Ok(msg) => {
+                    self.export_rx = None;
+                    self.status = msg;
+                    repaint = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.export_rx = None;
+                }
+            }
+        }
+        // Keep repainting while any background job is running (spinner).
+        if self.busy() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        } else if repaint {
+            ctx.request_repaint();
+        }
+    }
+
+    /// True while a background load or export is running.
+    fn busy(&self) -> bool {
+        self.load_rx.is_some() || self.export_rx.is_some()
     }
 
     /// Select a function; optionally record the current one in history.
@@ -359,7 +572,16 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if let Ok(json) = serde_json::to_string(&self.persist_state()) {
+            storage.set_string(PERSIST_KEY, json);
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Background job results (async load / export).
+        self.poll_threads(ctx);
+
         // Drag & drop support.
         let dropped: Option<String> = ctx.input(|i| {
             i.raw
@@ -380,6 +602,7 @@ impl eframe::App for App {
         }
 
         // Arrow-key navigation in the function list (no history entries).
+        // In the graph views the arrows pan the canvas instead.
         let kb_free = !ctx.wants_keyboard_input();
         let (down, up) = ctx.input(|i| {
             (
@@ -387,18 +610,20 @@ impl eframe::App for App {
                 i.key_pressed(egui::Key::ArrowUp),
             )
         });
-        if let Some(cur) = self.selected {
-            let n = self.loaded.as_ref().map_or(0, |l| l.fns.len());
-            let next = if down {
-                cur + 1
-            } else if up {
-                cur.saturating_sub(1)
-            } else {
-                cur
-            };
-            if next != cur && next < n {
-                self.fn_ensure_visible = true;
-                self.jump_to(next, false);
+        if self.center == CenterTab::Code {
+            if let Some(cur) = self.selected {
+                let n = self.loaded.as_ref().map_or(0, |l| l.fns.len());
+                let next = if down {
+                    cur + 1
+                } else if up {
+                    cur.saturating_sub(1)
+                } else {
+                    cur
+                };
+                if next != cur && next < n {
+                    self.fn_ensure_visible = true;
+                    self.jump_to(next, false);
+                }
             }
         }
 
@@ -601,27 +826,49 @@ impl App {
             self.status = "nothing loaded".into();
             return;
         };
+        if self.export_rx.is_some() {
+            self.status = "export already running…".into();
+            return;
+        }
         let out = l.path.with_extension("all.c");
-        let mut body = String::new();
-        for f in &l.fns {
-            body.push_str(&format!(
-                "// ==== fn[{}] {} @ insn {} ====\n",
-                f.idx,
-                f.display_name(),
-                f.entry
-            ));
-            match l.decompile(f.idx) {
-                Ok(dec) => body.push_str(&dec.text),
-                Err(e) => body.push_str(&format!("// decompile error: {e}\n")),
-            }
-            body.push('\n');
-        }
-        match std::fs::write(&out, body) {
-            Ok(()) => {
-                self.status = format!("exported {} functions -> {}", l.fns.len(), out.display())
-            }
-            Err(e) => self.status = format!("write {}: {e}", out.display()),
-        }
+        let src = l.path.clone();
+        let n_fns = l.fns.len();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.status = format!("exporting {n_fns} functions…");
+        std::thread::Builder::new()
+            .name("resq-export".into())
+            .spawn(move || {
+                // Reopen the image on the worker thread: keeps the UI thread
+                // free without sharing `Loaded` across threads.
+                let msg = match Loaded::open(&src) {
+                    Ok(l) => {
+                        let mut body = String::new();
+                        for f in &l.fns {
+                            body.push_str(&format!(
+                                "// ==== fn[{}] {} @ insn {} ====\n",
+                                f.idx,
+                                f.display_name(),
+                                f.entry
+                            ));
+                            match l.decompile(f.idx) {
+                                Ok(dec) => body.push_str(&dec.text),
+                                Err(e) => body.push_str(&format!("// decompile error: {e}\n")),
+                            }
+                            body.push('\n');
+                        }
+                        match std::fs::write(&out, body) {
+                            Ok(()) => {
+                                format!("exported {} functions -> {}", l.fns.len(), out.display())
+                            }
+                            Err(e) => format!("write {}: {e}", out.display()),
+                        }
+                    }
+                    Err(e) => format!("reopen for export: {e}"),
+                };
+                let _ = tx.send(msg);
+            })
+            .expect("spawn export thread");
+        self.export_rx = Some(rx);
     }
 
     fn top_bar(&mut self, ctx: &egui::Context) {
@@ -738,7 +985,10 @@ impl App {
                         ("Backspace / Alt+Left", "navigate back"),
                         ("Alt+Right", "navigate forward"),
                         ("Home", "center the call graph on vmMain"),
-                        ("Arrow Up / Down", "previous / next function"),
+                        ("Arrow Up / Down", "previous / next function (Code view)"),
+                        ("Arrows (graph views)", "pan the canvas"),
+                        ("+ / -", "zoom the canvas in / out"),
+                        ("F", "fit the graph to the window"),
                         ("Dbl-click fn name", "jump to function"),
                         ("RMB", "context menus everywhere"),
                         ("Graphs: wheel / drag", "zoom / pan; drag node = move"),
@@ -791,6 +1041,13 @@ impl App {
                 ui.add(egui::Checkbox::new(&mut self.sync_scroll, "Sync scroll"))
                     .on_hover_text("Scroll Disassembly and Identity C together (by fraction)");
                 ui.separator();
+                if self.busy() {
+                    let tip = match &self.loading_path {
+                        Some(p) => format!("loading {}…", p),
+                        None => "working in the background…".to_string(),
+                    };
+                    ui.add(egui::Spinner::new().size(14.0)).on_hover_text(tip);
+                }
                 ui.colored_label(egui::Color32::LIGHT_BLUE, &self.status);
             });
         });
@@ -1309,6 +1566,15 @@ impl App {
                     let d_out = sa.show_rows(&mut cols[0], mono_h, range.len(), |ui, rows| {
                         for i in rows {
                             let ii = range.start + i;
+                            // The row rect must be captured BEFORE the row is
+                            // rendered: after `render_row` the cursor already
+                            // points at the next line, and an interact placed
+                            // there is both misaligned (off by one row) and
+                            // shadowed by the tokens drawn later.
+                            let row = egui::Rect::from_min_size(
+                                ui.available_rect_before_wrap().min,
+                                egui::vec2(ui.available_width(), mono_h),
+                            );
                             // Fade flash of the recently jumped-to instruction.
                             let flash_tint = flash_tint(flash_prev, ii);
                             let tint = if flash_tint.is_some() {
@@ -1335,11 +1601,9 @@ impl App {
                                 c_goto: &mut c_goto_loc,
                             };
                             render_row(ui, l, &segs, &mut sink);
-                            // Instruction help tooltip on hover.
-                            let row = egui::Rect::from_min_size(
-                                ui.available_rect_before_wrap().min,
-                                egui::vec2(ui.available_width(), mono_h),
-                            );
+                            // Instruction help tooltip. Created last => on top
+                            // of the tokens; Sense::hover only, so clicks on
+                            // function/label/string tokens still pass through.
                             let mut help =
                                 format!("[{}] {}", ins.op.name(), opcode_help(ins.op));
                             if let Some(t) = ins.target {
@@ -1371,6 +1635,11 @@ impl App {
                     }
                     let c_out = sac.show_rows(&mut cols[1], mono_h, c_rows.len(), |ui, rows| {
                         for i in rows {
+                            // Row rect captured before rendering (see disasm).
+                            let row = egui::Rect::from_min_size(
+                                ui.available_rect_before_wrap().min,
+                                egui::vec2(ui.available_width(), mono_h),
+                            );
                             // Fade flash on the goto landing line.
                             let c_flash_tint = flash_tint(c_flash_prev, i);
                             paint_row_bg(ui, mono_h, c_flash_tint);
@@ -1386,23 +1655,18 @@ impl App {
                             };
                             render_row(ui, l, &segs, &mut sink);
                             // Hover/click a C line -> highlight its instructions.
+                            // Hover-only overlay keeps token clicks/menus alive;
+                            // a plain row click is detected manually.
                             let span = dec.ranges.get(i).copied();
-                            let row = egui::Rect::from_min_size(
-                                ui.available_rect_before_wrap().min,
-                                egui::vec2(ui.available_width(), mono_h),
-                            );
-                            let r = ui.interact(
-                                row,
-                                egui::Id::new(("crow", sel, i)),
-                                Sense::click(),
-                            );
+                            let r =
+                                ui.interact(row, egui::Id::new(("crow", sel, i)), Sense::hover());
                             if r.hovered() {
                                 new_c_range = span;
-                            }
-                            if r.clicked() {
-                                if let Some((rs, _)) = span {
-                                    pending_scroll = Some(rs);
-                                    flash_loc = Some(rs);
+                                if ui.input(|i| i.pointer.primary_clicked()) {
+                                    if let Some((rs, _)) = span {
+                                        pending_scroll = Some(rs);
+                                        flash_loc = Some(rs);
+                                    }
                                 }
                             }
                         }
@@ -1765,6 +2029,13 @@ fn merge_plain(mut segs: Vec<Seg>) -> Vec<Seg> {
     segs
 }
 
+/// Pointer inside `resp`'s rect: the per-row hover overlay sits on top of
+/// tokens and steals `hovered()`, so containment is checked directly.
+fn pointer_in(ui: &egui::Ui, resp: &egui::Response) -> bool {
+    ui.input(|i| i.pointer.latest_pos())
+        .is_some_and(|p| resp.rect.contains(p))
+}
+
 /// Render one source line as a single horizontal run of tight tokens.
 fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
     ui.horizontal(|ui| {
@@ -1774,7 +2045,7 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                 Seg::P(t, c) => plain_label(ui, t, *c),
                 Seg::FnTok(t, idx) => {
                     let r = tok_label(ui, t, C_FN);
-                    if r.hovered() {
+                    if pointer_in(ui, &r) {
                         *sink.hover_fn = Some(*idx);
                     }
                     if r.double_clicked() {
@@ -2035,6 +2306,8 @@ fn image_graph_pane(
     // Zoom around the pointer.
     let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
     cam.wheel_zoom(&resp, &rect, scroll_y, 0.03, 2.5);
+    // Keyboard pan / zoom / fit (accessibility).
+    canvas_keys(ui, cam, &rect, 0.03, 2.5);
 
     let clip = rect;
 
@@ -2299,6 +2572,8 @@ fn cfg_canvas(
     // Wheel = zoom around the pointer.
     let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
     cam.wheel_zoom(&resp, &rect, scroll_y, 0.15, 2.5);
+    // Keyboard pan / zoom / fit (accessibility).
+    canvas_keys(ui, cam, &rect, 0.15, 2.5);
 
     // Hit test.
     let pointer_world = resp
@@ -2509,5 +2784,75 @@ mod tests {
         assert!(flash_tint(Some((7, now)), 7).is_some());
         let old = std::time::Instant::now() - std::time::Duration::from_secs(2);
         assert_eq!(flash_tint(Some((7, old)), 7), None);
+    }
+
+    #[test]
+    fn tab_encodings_round_trip() {
+        // Direct round trips.
+        assert_eq!(CenterTab::from_u8(CenterTab::Code.as_u8()), CenterTab::Code);
+        assert_eq!(
+            CenterTab::from_u8(CenterTab::DGraph.as_u8()),
+            CenterTab::DGraph
+        );
+        assert_eq!(
+            CenterTab::from_u8(CenterTab::Graph.as_u8()),
+            CenterTab::Graph
+        );
+        for (t, v) in [
+            (BottomTab::Strings, 0u8),
+            (BottomTab::Traps, 1),
+            (BottomTab::Xrefs, 2),
+            (BottomTab::Bss, 3),
+            (BottomTab::Info, 4),
+        ] {
+            assert_eq!(t.as_u8(), v);
+            assert_eq!(BottomTab::from_u8(v), t);
+        }
+        // Unknown values fall back to defaults instead of panicking.
+        assert_eq!(CenterTab::from_u8(200), CenterTab::Code);
+        assert_eq!(BottomTab::from_u8(200), BottomTab::Strings);
+    }
+
+    #[test]
+    fn zoom_about_keeps_anchor_point_fixed() {
+        let rect_min = egui::Pos2::ZERO;
+        let anchor = egui::pos2(300.0, 200.0);
+        let mut cam = Cam {
+            pan: egui::vec2(-50.0, -30.0),
+            zoom: 1.0,
+            fit: false,
+        };
+        let world = (anchor - rect_min - cam.pan) / cam.zoom; // point under anchor
+        cam.zoom_about(rect_min, anchor, 2.0, 0.03, 2.5);
+        let anchor_after = cam.to_screen(rect_min, world);
+        assert!((anchor_after - anchor).length() < 0.01, "anchor moved");
+        assert_eq!(cam.zoom, 2.0);
+
+        // Clamp is respected.
+        cam.zoom_about(rect_min, anchor, 100.0, 0.03, 2.5);
+        assert_eq!(cam.zoom, 2.5);
+        cam.zoom_about(rect_min, anchor, 0.0001, 0.03, 2.5);
+        assert_eq!(cam.zoom, 0.03);
+    }
+
+    #[test]
+    fn persist_state_round_trips_through_json() {
+        let s = PersistState {
+            path_edit: "work/qagame.qvm".into(),
+            filter: "trap_\"x\"".into(),
+            strings_filter: "привет".into(),
+            bss_filter: "".into(),
+            sync_scroll: true,
+            center: CenterTab::Graph.as_u8(),
+            tab: BottomTab::Xrefs.as_u8(),
+        };
+        let json = serde_json::to_string(&s).expect("serialize");
+        let back: PersistState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.path_edit, s.path_edit);
+        assert_eq!(back.filter, s.filter);
+        assert_eq!(back.strings_filter, s.strings_filter);
+        assert_eq!(back.sync_scroll, s.sync_scroll);
+        assert_eq!(CenterTab::from_u8(back.center), CenterTab::Graph,);
+        assert_eq!(BottomTab::from_u8(back.tab), BottomTab::Xrefs);
     }
 }

@@ -18,6 +18,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "RESQ kit",
         options,
-        Box::new(move |_cc| Ok(Box::new(resq_gui::app::App::new(initial)))),
+        Box::new(move |cc| Ok(Box::new(resq_gui::app::App::new(cc, initial)))),
     )
 }
