@@ -672,7 +672,7 @@ fn d_segments(line: &str, tok: &Tok) -> Vec<Seg> {
             }
         }
     }
-    out
+    merge_plain(out)
 }
 
 fn classify_ident(w: &str, tok: &Tok, out: &mut Vec<Seg>) {
@@ -769,7 +769,7 @@ fn c_segments(line: &str, tok: &Tok) -> Vec<Seg> {
             i += 1;
         }
     }
-    out
+    merge_plain(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -790,6 +790,42 @@ fn tok_label(ui: &mut egui::Ui, txt: &str, color: Color32) -> egui::Response {
     )
 }
 
+/// Merge adjacent same-color plain chunks: fewer widgets per row.
+fn merge_plain(mut segs: Vec<Seg>) -> Vec<Seg> {
+    segs.dedup_by(|a, b| match (a, b) {
+        (Seg::P(at, ac), Seg::P(bt, bc)) => {
+            if ac == bc {
+                bt.push_str(at);
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    });
+    segs
+}
+
+/// Render one source line as a single horizontal run of tight tokens.
+fn render_row(ui: &mut egui::Ui, segs: &[Seg], on_tok: &mut impl FnMut(&egui::Response, &Seg)) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for s in segs {
+            match s {
+                Seg::P(t, c) => plain_label(ui, t, *c),
+                Seg::LblTok(t, _) => {
+                    let r = tok_label(ui, t, C_LBL);
+                    on_tok(&r, s);
+                }
+                Seg::FnTok(t, _) => {
+                    let r = tok_label(ui, t, C_FN);
+                    on_tok(&r, s);
+                }
+            }
+        }
+    });
+}
+
 fn render_segs_disasm(
     ui: &mut egui::Ui,
     segs: &[Seg],
@@ -797,20 +833,19 @@ fn render_segs_disasm(
     scroll: &mut Option<usize>,
     hover_tok: &mut Option<String>,
 ) {
-    for s in segs {
-        match s {
-            Seg::P(t, c) => plain_label(ui, t, *c),
-            Seg::LblTok(_, _) => {}
-            Seg::FnTok(t, idx) => {
-                let r = tok_label(ui, t, C_FN);
-                if r.hovered() {
-                    *hover_tok = Some(t.clone());
-                }
-                if r.double_clicked() {
-                    *jump = Some(*idx);
-                }
+    let mut jump_out = None;
+    render_row(ui, segs, &mut |r, s| {
+        if let Seg::FnTok(t, idx) = s {
+            if r.hovered() {
+                *hover_tok = Some(t.clone());
+            }
+            if r.double_clicked() {
+                jump_out = Some(*idx);
             }
         }
+    });
+    if jump_out.is_some() {
+        *jump = jump_out;
     }
     let _ = scroll;
 }
@@ -822,25 +857,29 @@ fn render_segs_c(
     scroll: &mut Option<usize>,
     hover_fn: &mut Option<usize>,
 ) {
-    for s in segs {
-        match s {
-            Seg::P(t, c) => plain_label(ui, t, *c),
-            Seg::FnTok(t, idx) => {
-                let r = tok_label(ui, t, C_FN);
-                if r.hovered() {
-                    *hover_fn = Some(*idx);
-                }
-                if r.double_clicked() {
-                    *jump = Some(*idx);
-                }
+    let mut jump_out = None;
+    let mut scroll_out = None;
+    render_row(ui, segs, &mut |r, s| match s {
+        Seg::FnTok(_, idx) => {
+            if r.hovered() {
+                *hover_fn = Some(*idx);
             }
-            Seg::LblTok(t, n) => {
-                let r = tok_label(ui, t, C_LBL);
-                if r.clicked() {
-                    *scroll = Some(*n);
-                }
+            if r.double_clicked() {
+                jump_out = Some(*idx);
             }
         }
+        Seg::LblTok(_, n) => {
+            if r.clicked() {
+                scroll_out = Some(*n);
+            }
+        }
+        Seg::P(_, _) => {}
+    });
+    if jump_out.is_some() {
+        *jump = jump_out;
+    }
+    if scroll_out.is_some() {
+        *scroll = scroll_out;
     }
 }
 
