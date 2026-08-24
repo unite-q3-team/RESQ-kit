@@ -11,6 +11,7 @@ use eframe::egui;
 use egui::{Color32, RichText, Sense, TextWrapMode};
 use qvm::Opcode;
 
+use crate::i18n::{self, Lang};
 use crate::state::{escape, insn_bytes, opcode_help, Decompiled, Loaded};
 
 /// Keep at most this many decompiled functions cached (FIFO eviction).
@@ -183,6 +184,8 @@ struct PersistState {
     center: u8,
     #[serde(default)]
     tab: u8,
+    #[serde(default)]
+    lang: u8,
 }
 
 /// Decode an embedded PNG into straight-alpha RGBA pixels (window icons).
@@ -290,6 +293,8 @@ struct Sink<'a> {
     /// Allow hover hints on address tokens (Identity C pane only — the
     /// Disassembly row tooltip owns hover there).
     token_hints: bool,
+    /// UI language for token context-menu labels.
+    lang: Lang,
 }
 
 pub struct App {
@@ -306,6 +311,8 @@ pub struct App {
     status: String,
     tab: BottomTab,
     center: CenterTab,
+    /// UI language (EN / RU), persisted.
+    lang: Lang,
     /// Call-graph canvas camera.
     cam_graph: Cam,
     /// CFG canvas camera.
@@ -370,6 +377,7 @@ impl App {
             status: "open a .qvm (File menu, path field, or drag & drop)".into(),
             tab: BottomTab::Strings,
             center: CenterTab::Code,
+            lang: Lang::default(),
             cam_graph: Cam::default(),
             cam_cfg: Cam::default(),
             img_offsets: HashMap::new(),
@@ -408,6 +416,7 @@ impl App {
                     app.bss_filter = s.bss_filter;
                     app.center = CenterTab::from_u8(s.center);
                     app.tab = BottomTab::from_u8(s.tab);
+                    app.lang = Lang::from_u8(s.lang);
                 }
             }
         }
@@ -430,19 +439,30 @@ impl App {
             bss_filter: self.bss_filter.clone(),
             center: self.center.as_u8(),
             tab: self.tab.as_u8(),
+            lang: self.lang.as_u8(),
         }
+    }
+
+    /// Translate a static UI string into the current language.
+    fn tr(&self, s: &'static str) -> &'static str {
+        i18n::tr(self.lang, s)
+    }
+
+    /// Translate a `%KEY`-templated UI string.
+    fn trf(&self, s: &'static str, args: &[(&str, &dyn std::fmt::Display)]) -> String {
+        i18n::trf(self.lang, s, args)
     }
 
     /// Request an async load: the file is parsed on a background thread so
     /// the UI stays responsive; the result is polled in `update`.
     pub fn load_path(&mut self, path: &str) {
         if self.load_rx.is_some() {
-            self.status = "already loading a file…".into();
+            self.status = self.tr("already loading a file…").into();
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
         let p = path.to_string();
-        self.status = format!("loading {}…", path);
+        self.status = self.trf("loading %PATH…", &[("PATH", &path.to_string())]);
         self.loading_path = Some(p.clone());
         std::thread::Builder::new()
             .name("resq-load".into())
@@ -458,10 +478,14 @@ impl App {
     fn apply_loaded(&mut self, l: Loaded) {
         let n = l.fns.len();
         let insns = l.lines.len();
-        self.status = format!(
-            "{}: {n} functions, {insns} instructions, {} lit strings",
-            l.path.display(),
-            l.lit_strings.len()
+        self.status = self.trf(
+            "%PATH: %N functions, %I instructions, %S lit strings",
+            &[
+                ("PATH", &l.path.display()),
+                ("N", &n),
+                ("I", &insns),
+                ("S", &l.lit_strings.len()),
+            ],
         );
         self.selected = Some(0);
         self.rename_buf.clear();
@@ -604,7 +628,7 @@ impl eframe::App for App {
                 let name = std::path::Path::new(&p)
                     .file_name()
                     .map_or_else(|| p.clone(), |n| n.display().to_string());
-                self.status = format!("not a .qvm, ignored: {name}");
+                self.status = self.trf("not a .qvm, ignored: %NAME", &[("NAME", &name)]);
             }
         }
 
@@ -696,7 +720,8 @@ impl eframe::App for App {
         for hv in hex_windows {
             if let Some(l) = &self.loaded {
                 let mut open = true;
-                egui::Window::new(format!("Memory — {}", hv.title))
+                let title = i18n::trf(self.lang, "Memory - %T", &[("T", &hv.title)]);
+                egui::Window::new(title)
                     .id(egui::Id::new(("hexwin", hv.addr, hv.title.clone())))
                     .open(&mut open)
                     .default_width(560.0)
@@ -768,30 +793,41 @@ impl App {
                 Ok(p) => {
                     let bak = p.with_extension("map.bak");
                     self.status = if bak.is_file() {
-                        format!("saved {} (previous copy: {})", p.display(), bak.display())
+                        self.trf(
+                            "saved %PATH (previous copy: %BAK)",
+                            &[("PATH", &p.display()), ("BAK", &bak.display())],
+                        )
                     } else {
-                        format!("saved {}", p.display())
+                        self.trf("saved %PATH", &[("PATH", &p.display())])
                     };
                 }
                 Err(e) => self.status = e,
             }
         } else {
-            self.status = "nothing loaded".into();
+            self.status = self.tr("nothing loaded").into();
         }
     }
 
     fn export_disasm(&mut self) {
         let Some(l) = &self.loaded else {
-            self.status = "nothing loaded".into();
+            self.status = self.tr("nothing loaded").into();
             return;
         };
         let out = l.path.with_extension("disasm.txt");
         let body = l.lines.join("\n");
         match std::fs::write(&out, body) {
             Ok(()) => {
-                self.status = format!("exported {} lines -> {}", l.lines.len(), out.display())
+                self.status = self.trf(
+                    "exported %N lines -> %PATH",
+                    &[("N", &l.lines.len()), ("PATH", &out.display())],
+                )
             }
-            Err(e) => self.status = format!("write {}: {e}", out.display()),
+            Err(e) => {
+                self.status = self.trf(
+                    "write %PATH: %ERR",
+                    &[("PATH", &out.display()), ("ERR", &e)],
+                )
+            }
         }
     }
 
@@ -820,28 +856,36 @@ impl App {
                     .collect();
                 let out = l.path.with_extension(format!("fn{sel}_{name}.c"));
                 match std::fs::write(&out, &*dec.text) {
-                    Ok(()) => self.status = format!("exported -> {}", out.display()),
-                    Err(e) => self.status = format!("write {}: {e}", out.display()),
+                    Ok(()) => {
+                        self.status = self.trf("exported -> %PATH", &[("PATH", &out.display())])
+                    }
+                    Err(e) => {
+                        self.status = self.trf(
+                            "write %PATH: %ERR",
+                            &[("PATH", &out.display()), ("ERR", &e)],
+                        )
+                    }
                 }
             }
-            Err(e) => self.status = format!("decompile: {e}"),
+            Err(e) => self.status = self.trf("decompile: %ERR", &[("ERR", &e)]),
         }
     }
 
     fn export_c_all(&mut self) {
         let Some(l) = &self.loaded else {
-            self.status = "nothing loaded".into();
+            self.status = self.tr("nothing loaded").into();
             return;
         };
         if self.export_rx.is_some() {
-            self.status = "export already running…".into();
+            self.status = self.tr("export already running…").into();
             return;
         }
         let out = l.path.with_extension("all.c");
         let src = l.path.clone();
         let n_fns = l.fns.len();
+        let lang = self.lang;
         let (tx, rx) = std::sync::mpsc::channel();
-        self.status = format!("exporting {n_fns} functions…");
+        self.status = i18n::trf(lang, "exporting %N functions…", &[("N", &n_fns)]);
         std::thread::Builder::new()
             .name("resq-export".into())
             .spawn(move || {
@@ -864,13 +908,19 @@ impl App {
                             body.push('\n');
                         }
                         match std::fs::write(&out, body) {
-                            Ok(()) => {
-                                format!("exported {} functions -> {}", l.fns.len(), out.display())
-                            }
-                            Err(e) => format!("write {}: {e}", out.display()),
+                            Ok(()) => i18n::trf(
+                                lang,
+                                "exported %N functions -> %PATH",
+                                &[("N", &l.fns.len()), ("PATH", &out.display())],
+                            ),
+                            Err(e) => i18n::trf(
+                                lang,
+                                "write %PATH: %ERR",
+                                &[("PATH", &out.display()), ("ERR", &e)],
+                            ),
                         }
                     }
-                    Err(e) => format!("reopen for export: {e}"),
+                    Err(e) => i18n::trf(lang, "reopen for export: %ERR", &[("ERR", &e)]),
                 };
                 let _ = tx.send(msg);
             })
@@ -898,66 +948,66 @@ impl App {
                     ui.separator();
                 }
                 // ---- File ------------------------------------------------
-                ui.menu_button("File", |ui| {
+                ui.menu_button(self.tr("File"), |ui| {
                     if ui
-                        .button("Open… (file dialog)")
+                        .button(self.tr("Open… (file dialog)"))
                         .on_hover_text("Ctrl+O")
                         .clicked()
                     {
                         ui.close_menu();
                         self.open_dialog();
                     }
-                    if ui.button("Open (path field)").clicked() {
+                    if ui.button(self.tr("Open (path field)")).clicked() {
                         ui.close_menu();
                         let p = self.path_edit.clone();
                         self.load_path(&p);
                     }
-                    if ui.button("Reload").on_hover_text("F5").clicked() {
+                    if ui.button(self.tr("Reload")).on_hover_text("F5").clicked() {
                         ui.close_menu();
                         let p = self.path_edit.clone();
                         self.load_path(&p);
                     }
-                    if ui.button("Save .map").on_hover_text("Ctrl+S").clicked() {
+                    if ui
+                        .button(self.tr("Save .map"))
+                        .on_hover_text("Ctrl+S")
+                        .clicked()
+                    {
                         ui.close_menu();
                         self.save_map_action();
                     }
                     ui.separator();
-                    if ui.button("Quit").clicked() {
+                    if ui.button(self.tr("Quit")).clicked() {
                         ui.close_menu();
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
 
                 // ---- View ------------------------------------------------
-                ui.menu_button("View", |ui| {
-                    if ui
-                        .button("Back")
-                        .on_hover_text("Backspace / Alt+Left")
-                        .clicked()
-                    {
+                ui.menu_button(self.tr("View"), |ui| {
+                    if ui.button(self.tr("Back")).clicked() {
                         ui.close_menu();
                         self.go_back();
                     }
-                    if ui.button("Forward").on_hover_text("Alt+Right").clicked() {
+                    if ui.button(self.tr("Forward")).clicked() {
                         ui.close_menu();
                         self.go_forward();
                     }
                     ui.separator();
-                    if ui.button("Code view").clicked() {
+                    if ui.button(self.tr("Code view")).clicked() {
                         ui.close_menu();
                         self.center = CenterTab::Code;
                     }
-                    if ui.button("DGraph view (disasm graph)").clicked() {
+                    if ui.button(self.tr("DGraph view (disasm graph)")).clicked() {
                         ui.close_menu();
                         self.center = CenterTab::DGraph;
                     }
-                    if ui.button("Call graph (whole image)").clicked() {
+                    if ui.button(self.tr("Call graph (whole image)")).clicked() {
                         ui.close_menu();
                         self.center = CenterTab::Graph;
                     }
                     ui.separator();
                     if ui
-                        .button("Graph: center on vmMain")
+                        .button(self.tr("Graph: center on vmMain"))
                         .on_hover_text("Home")
                         .clicked()
                     {
@@ -967,38 +1017,60 @@ impl App {
                             self.graph_focus = Some(l.entry_fn());
                         }
                     }
-                    if ui.button("Graph: fit image").clicked() {
+                    if ui.button(self.tr("Graph: fit image")).clicked() {
                         ui.close_menu();
                         self.cam_graph.fit = true;
                     }
-                    if ui.button("Graph: zoom in").on_hover_text("+").clicked() {
+                    if ui
+                        .button(self.tr("Graph: zoom in"))
+                        .on_hover_text("+")
+                        .clicked()
+                    {
                         ui.close_menu();
                         self.cam_graph.zoom = (self.cam_graph.zoom * 1.3).clamp(0.03, 2.5);
                     }
-                    if ui.button("Graph: zoom out").on_hover_text("-").clicked() {
+                    if ui
+                        .button(self.tr("Graph: zoom out"))
+                        .on_hover_text("-")
+                        .clicked()
+                    {
                         ui.close_menu();
                         self.cam_graph.zoom = (self.cam_graph.zoom / 1.3).clamp(0.03, 2.5);
                     }
+                    ui.separator();
+                    ui.menu_button(self.tr("Language"), |ui| {
+                        for l in Lang::all() {
+                            if ui
+                                .selectable_label(self.lang == l, l.native_name())
+                                .clicked()
+                            {
+                                self.lang = l;
+                            }
+                        }
+                    });
                 });
 
                 // ---- Tools -----------------------------------------------
-                ui.menu_button("Tools", |ui| {
-                    if ui.button("Export disassembly (.txt)").clicked() {
+                ui.menu_button(self.tr("Tools"), |ui| {
+                    if ui.button(self.tr("Export disassembly (.txt)")).clicked() {
                         ui.close_menu();
                         self.export_disasm();
                     }
-                    if ui.button("Export identity C (selected fn)").clicked() {
+                    if ui
+                        .button(self.tr("Export identity C (selected fn)"))
+                        .clicked()
+                    {
                         ui.close_menu();
                         self.export_c_selected();
                     }
-                    if ui.button("Export identity C (all fns)").clicked() {
+                    if ui.button(self.tr("Export identity C (all fns)")).clicked() {
                         ui.close_menu();
                         self.export_c_all();
                     }
                 });
 
                 // ---- Help ------------------------------------------------
-                ui.menu_button("Help", |ui| {
+                ui.menu_button(self.tr("Help"), |ui| {
                     if let Some(tex) = &self.logo {
                         let size = tex.size_vec2();
                         let h = 44.0;
@@ -1008,22 +1080,28 @@ impl App {
                         );
                         ui.separator();
                     }
-                    ui.strong("Shortcuts");
+                    ui.strong(self.tr("Shortcuts"));
                     for (keys, what) in [
-                        ("Ctrl+O", "open a QVM via the file dialog"),
-                        ("Enter (path field)", "load the typed path"),
-                        ("F5", "reload the current file"),
-                        ("Ctrl+S", "save renames to .map"),
-                        ("Backspace / Alt+Left", "navigate back"),
-                        ("Alt+Right", "navigate forward"),
-                        ("Home", "center the call graph on vmMain"),
-                        ("Arrow Up / Down", "previous / next function (Code view)"),
-                        ("Arrows (graph views)", "pan the canvas"),
-                        ("+ / -", "zoom the canvas in / out"),
-                        ("F", "fit the graph to the window"),
-                        ("Dbl-click fn name", "jump to function"),
-                        ("RMB", "context menus everywhere"),
-                        ("Graphs: wheel / drag", "zoom / pan; drag node = move"),
+                        ("Ctrl+O", self.tr("open a QVM via the file dialog")),
+                        ("Enter (path field)", self.tr("load the typed path")),
+                        ("F5", self.tr("reload the current file")),
+                        ("Ctrl+S", self.tr("save renames to .map")),
+                        ("Backspace / Alt+Left", self.tr("navigate back")),
+                        ("Alt+Right", self.tr("navigate forward")),
+                        ("Home", self.tr("center the call graph on vmMain")),
+                        (
+                            "Arrow Up / Down",
+                            self.tr("previous / next function (Code view)"),
+                        ),
+                        ("Arrows (graph views)", self.tr("pan the canvas")),
+                        ("+ / -", self.tr("zoom the canvas in / out")),
+                        ("F", self.tr("fit the graph to the window")),
+                        ("Dbl-click fn name", self.tr("jump to function")),
+                        ("RMB", self.tr("context menus everywhere")),
+                        (
+                            "Graphs: wheel / drag",
+                            self.tr("zoom / pan; drag node = move"),
+                        ),
                     ] {
                         ui.label(format!("{keys:<22} {what}"));
                     }
@@ -1046,7 +1124,7 @@ impl App {
                 let home = kb_free && ctx.input(|i| i.key_pressed(egui::Key::Home));
                 if ui
                     .add_enabled(self.loaded.is_some(), egui::Button::new("vmMain"))
-                    .on_hover_text("Home — center the call graph on the entry function")
+                    .on_hover_text(self.tr("Home - center the call graph on the entry function"))
                     .clicked()
                     || home
                 {
@@ -1056,15 +1134,18 @@ impl App {
                     }
                 }
                 if ui
-                    .add_enabled(!self.hist.is_empty(), egui::Button::new("Back"))
-                    .on_hover_text("Back (Backspace / Alt+Left)")
+                    .add_enabled(!self.hist.is_empty(), egui::Button::new(self.tr("Back")))
+                    .on_hover_text(self.tr("Back (Backspace / Alt+Left)"))
                     .clicked()
                 {
                     self.go_back();
                 }
                 if ui
-                    .add_enabled(!self.hist_fwd.is_empty(), egui::Button::new("Fwd"))
-                    .on_hover_text("Forward (Alt+Right)")
+                    .add_enabled(
+                        !self.hist_fwd.is_empty(),
+                        egui::Button::new(self.tr("Forward")),
+                    )
+                    .on_hover_text(self.tr("Forward (Alt+Right)"))
                     .clicked()
                 {
                     self.go_forward();
@@ -1072,8 +1153,8 @@ impl App {
                 ui.separator();
                 if self.busy() {
                     let tip = match &self.loading_path {
-                        Some(p) => format!("loading {}…", p),
-                        None => "working in the background…".to_string(),
+                        Some(p) => self.trf("loading %PATH…", &[("PATH", p)]),
+                        None => self.tr("working in the background…").to_string(),
                     };
                     ui.add(egui::Spinner::new().size(14.0)).on_hover_text(tip);
                 }
@@ -1115,13 +1196,17 @@ impl App {
             .width_range(180.0..=520.0)
             .resizable(true)
             .show(ctx, |ui| {
+                let filter_hint = self.tr("filter: name / trap / string...");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.filter)
-                        .hint_text("filter: name / trap / string...")
+                        .hint_text(filter_hint)
                         .font(egui::TextStyle::Monospace),
                 );
                 let Some(l) = &self.loaded else { return };
-                ui.label(format!("{}/{} functions", rows.len(), l.fns.len()));
+                ui.label(self.trf(
+                    "%A/%B functions",
+                    &[("A", &rows.len()), ("B", &l.fns.len())],
+                ));
                 let sel = self.selected;
                 let row_h = ui.text_style_height(&egui::TextStyle::Body);
                 let mut sa = egui::ScrollArea::vertical().auto_shrink([false, false]);
@@ -1160,11 +1245,11 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     for (tab, name) in [
-                        (BottomTab::Strings, "Strings"),
-                        (BottomTab::Traps, "Traps"),
+                        (BottomTab::Strings, self.tr("Strings")),
+                        (BottomTab::Traps, self.tr("Traps")),
                         (BottomTab::Xrefs, "Xrefs"),
                         (BottomTab::Bss, "BSS"),
-                        (BottomTab::Info, "Info"),
+                        (BottomTab::Info, self.tr("Info")),
                     ] {
                         if ui.selectable_label(self.tab == tab, name).clicked() {
                             self.tab = tab;
@@ -1179,9 +1264,10 @@ impl App {
 
                 match self.tab {
                     BottomTab::Strings => {
+                        let strings_hint = self.tr("filter strings...");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.strings_filter)
-                                .hint_text("filter strings...")
+                                .hint_text(strings_hint)
                                 .font(egui::TextStyle::Monospace),
                         );
                         let needle = self.strings_filter.to_lowercase();
@@ -1195,7 +1281,10 @@ impl App {
                             })
                             .map(|(a, s)| (*a, s))
                             .collect();
-                        ui.monospace(format!("{}/{} strings", rows.len(), l.lit_strings.len()));
+                        ui.monospace(self.trf(
+                            "%A/%B strings",
+                            &[("A", &rows.len()), ("B", &l.lit_strings.len())],
+                        ));
                         egui::ScrollArea::vertical()
                             .id_salt("strings")
                             .auto_shrink([false, false])
@@ -1203,19 +1292,22 @@ impl App {
                                 for r in range {
                                     let (addr, s) = &rows[r];
                                     let users = l.string_refs.get(addr).map_or(0, Vec::len);
-                                    let txt = format!("@{addr}  \"{}\"  ({users} refs)", escape(s));
+                                    let txt = self.trf(
+                                        "@%A  \"%T\"  (%B refs)",
+                                        &[("A", addr), ("T", &escape(s)), ("B", &users)],
+                                    );
                                     let resp = ui.selectable_label(false, &txt);
                                     resp.context_menu(|ui| {
                                         ui.label(format!("@{addr}"));
-                                        if ui.button("Hex dump string").clicked() {
+                                        if ui.button(self.tr("Hex dump string")).clicked() {
                                             ui.close_menu();
                                             hex_loc = Some(HexReq {
-                                                title: format!("string @ {addr}"),
+                                                title: self.trf("string @ %A", &[("A", addr)]),
                                                 addr: *addr,
                                                 len: s.len().max(1),
                                             });
                                         }
-                                        ui.menu_button("Xrefs to string", |ui| {
+                                        ui.menu_button(self.tr("Xrefs to string"), |ui| {
                                             match l.string_refs.get(addr) {
                                                 Some(v) if !v.is_empty() => {
                                                     for fi in v.iter().take(30) {
@@ -1234,11 +1326,11 @@ impl App {
                                                     }
                                                 }
                                                 _ => {
-                                                    ui.label("(none)");
+                                                    ui.label(self.tr("  (none)"));
                                                 }
                                             }
                                         });
-                                        if ui.button("Copy text").clicked() {
+                                        if ui.button(self.tr("Copy text")).clicked() {
                                             ui.close_menu();
                                             ui.output_mut(|o| o.copied_text = s.to_string());
                                         }
@@ -1293,13 +1385,17 @@ impl App {
                             .id_salt("xrefs")
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                ui.monospace(format!(
-                                    "fn[{sel}] {fname}: {} callers, {} callees",
-                                    callers.len(),
-                                    callees.len()
+                                ui.monospace(self.trf(
+                                    "fn[%S] %N: %C callers, %K callees",
+                                    &[
+                                        ("S", &sel),
+                                        ("N", &fname),
+                                        ("C", &callers.len()),
+                                        ("K", &callees.len()),
+                                    ],
                                 ));
                                 ui.add_space(4.0);
-                                ui.monospace(format!("called by ({}):", callers.len()));
+                                ui.monospace(self.trf("called by (%N):", &[("N", &callers.len())]));
                                 for ci in &callers {
                                     let f = &l.fns[*ci];
                                     let row =
@@ -1309,10 +1405,10 @@ impl App {
                                     }
                                 }
                                 if callers.is_empty() {
-                                    ui.monospace("  (none)");
+                                    ui.monospace(self.tr("  (none)"));
                                 }
                                 ui.add_space(4.0);
-                                ui.monospace(format!("calls ({}):", callees.len()));
+                                ui.monospace(self.trf("calls (%N):", &[("N", &callees.len())]));
                                 for ti in &callees {
                                     let f = &l.fns[*ti];
                                     let row =
@@ -1322,14 +1418,15 @@ impl App {
                                     }
                                 }
                                 if callees.is_empty() {
-                                    ui.monospace("  (none)");
+                                    ui.monospace(self.tr("  (none)"));
                                 }
                             });
                     }
                     BottomTab::Bss => {
+                        let bss_hint = self.tr("filter globals by address / function name...");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.bss_filter)
-                                .hint_text("filter globals by address / function name...")
+                                .hint_text(bss_hint)
                                 .font(egui::TextStyle::Monospace),
                         );
                         let needle = self.bss_filter.to_lowercase();
@@ -1378,10 +1475,13 @@ impl App {
                                     let resp = ui.selectable_label(false, &txt);
                                     resp.context_menu(|ui| {
                                         ui.label(format!("@{addr:#x}"));
-                                        if ui.button("Hex dump memory").clicked() {
+                                        if ui.button(self.tr("Hex dump memory")).clicked() {
                                             ui.close_menu();
                                             hex_loc = Some(HexReq {
-                                                title: format!("bss @ {addr:#x}"),
+                                                title: self.trf(
+                                                    "bss @ %X",
+                                                    &[("X", &format!("{addr:#x}"))],
+                                                ),
                                                 addr: *addr,
                                                 len: 128,
                                             });
@@ -1412,12 +1512,14 @@ impl App {
                     }
                     BottomTab::Info => {
                         ui.monospace(format!("{}", l.qvm));
-                        ui.monospace(format!("file: {}", l.path.display()));
-                        ui.monospace(format!(
-                            "functions: {}, instructions: {}, lit strings: {}",
-                            l.fns.len(),
-                            l.lines.len(),
-                            l.lit_strings.len()
+                        ui.monospace(self.trf("file: %P", &[("P", &l.path.display())]));
+                        ui.monospace(self.trf(
+                            "functions: %A, instructions: %B, lit strings: %C",
+                            &[
+                                ("A", &l.fns.len()),
+                                ("B", &l.lines.len()),
+                                ("C", &l.lit_strings.len()),
+                            ],
                         ));
                     }
                 }
@@ -1430,7 +1532,7 @@ impl App {
     fn center_panes(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.loaded.is_none() {
-                ui.centered_and_justified(|ui| ui.label("Load a QVM to inspect it."));
+                ui.centered_and_justified(|ui| ui.label(self.tr("Load a QVM to inspect it.")));
                 return;
             }
 
@@ -1441,12 +1543,13 @@ impl App {
             // Header row: rename + center tabs + graph helpers.
             ui.horizontal(|ui| {
                 ui.monospace(format!("fn[{sel}] @ insn {entry}"));
+                let rename_hint = self.tr("rename...");
                 let resp = ui.add_sized(
                     [320.0, mono_h + 6.0],
-                    egui::TextEdit::singleline(&mut self.rename_buf).hint_text("rename..."),
+                    egui::TextEdit::singleline(&mut self.rename_buf).hint_text(rename_hint),
                 );
                 let commit = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if commit || ui.button("Rename").clicked() {
+                if commit || ui.button(self.tr("Rename")).clicked() {
                     let new_name = self.rename_buf.trim().to_string();
                     if let Some(x) = &mut self.loaded {
                         x.rename(sel, &new_name);
@@ -1457,56 +1560,56 @@ impl App {
                     self.c_order.clear();
                     self.gen += 1; // display names changed -> rebuild list rows
                     self.status = if new_name.is_empty() {
-                        format!("cleared name of fn[{sel}]")
+                        self.trf("cleared name of fn[%I]", &[("I", &sel)])
                     } else {
-                        format!("renamed fn[{sel}] -> {new_name}")
+                        self.trf("renamed fn[%I] -> %NAME", &[("I", &sel), ("NAME", &new_name)])
                     };
                 }
                 ui.separator();
                 if ui
-                    .selectable_label(self.center == CenterTab::Code, "Code")
+                    .selectable_label(self.center == CenterTab::Code, self.tr("Code"))
                     .clicked()
                 {
                     self.center = CenterTab::Code;
                 }
                 if ui
                     .selectable_label(self.center == CenterTab::DGraph, "DGraph")
-                    .on_hover_text("Disassembly graph: CFG with IF/branch edges")
+                    .on_hover_text(self.tr("Disassembly graph: CFG with IF/branch edges"))
                     .clicked()
                 {
                     self.center = CenterTab::DGraph;
                 }
                 if ui
-                    .selectable_label(self.center == CenterTab::Graph, "Graph")
+                    .selectable_label(self.center == CenterTab::Graph, self.tr("Graph"))
                     .clicked()
                 {
                     self.center = CenterTab::Graph;
                 }
                 if self.center == CenterTab::Graph {
                     ui.separator();
-                    if ui.button("Fit").clicked() {
+                    if ui.button(self.tr("Fit")).clicked() {
                         self.cam_graph.fit = true;
                     }
-                    if ui.button("Reset layout").clicked() {
+                    if ui.button(self.tr("Reset layout")).clicked() {
                         self.img_offsets.clear();
                     }
                     ui.separator();
-                    ui.monospace(
+                    ui.monospace(self.tr(
                         "call graph: drag canvas = pan, wheel = zoom, drag node = move, RMB = menu, dbl-click = open",
-                    );
+                    ));
                 }
                 if self.center == CenterTab::DGraph {
                     ui.separator();
-                    if ui.button("Fit").clicked() {
+                    if ui.button(self.tr("Fit")).clicked() {
                         self.cam_cfg.fit = true;
                     }
-                    if ui.button("Reset layout").clicked() {
+                    if ui.button(self.tr("Reset layout")).clicked() {
                         self.cfg_offsets.clear();
                     }
                     ui.separator();
-                    ui.monospace(
+                    ui.monospace(self.tr(
                         "CFG: drag canvas = pan, wheel = zoom, drag node = move, RMB = menu; taken edge = `if <OP>`, green = `else`",
-                    );
+                    ));
                 }
             });
 
@@ -1573,7 +1676,7 @@ impl App {
             match self.center {
                 CenterTab::Code => ui.columns(2, |cols| {
                     // ---- left: disassembly ---------------------------------
-                    cols[0].heading("Disassembly");
+                    cols[0].heading(self.tr("Disassembly"));
                     let mut sa = egui::ScrollArea::vertical()
                         .id_salt("disasm")
                         .auto_shrink([false, false]);
@@ -1619,6 +1722,7 @@ impl App {
                                 flash: &mut flash_loc,
                                 c_goto: &mut c_goto_loc,
                                 token_hints: false,
+                                lang: self.lang,
                             };
                             render_row(ui, l, &segs, &mut sink);
                             // Instruction help tooltip. Created last => on top
@@ -1678,6 +1782,7 @@ impl App {
                                 flash: &mut flash_loc,
                                 c_goto: &mut c_goto_loc,
                                 token_hints: true,
+                                lang: self.lang,
                             };
                             render_row(ui, l, &segs, &mut sink);
                             // Hover/click a C line -> highlight its instructions.
@@ -1705,6 +1810,7 @@ impl App {
                         sel,
                         &cfg,
                         &tok,
+                        self.lang,
                         &mut self.cam_cfg,
                         &mut self.cfg_offsets,
                         &mut self.cfg_drag,
@@ -1719,6 +1825,7 @@ impl App {
                             l,
                             sel,
                             &tok,
+                            self.lang,
                             &mut self.cam_graph,
                             &mut self.graph_focus,
                             &mut self.img_offsets,
@@ -2080,18 +2187,22 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                             f.display_name(),
                             f.entry
                         ));
-                        if ui.button("Go to function").clicked() {
+                        if ui.button(i18n::tr(sink.lang, "Go to function")).clicked() {
                             ui.close_menu();
                             *sink.jump = Some(*idx);
                         }
                         if ui
-                            .button(format!("Xrefs to {}", f.display_name()))
+                            .button(i18n::trf(
+                                sink.lang,
+                                "Xrefs to %NAME",
+                                &[("NAME", &f.display_name())],
+                            ))
                             .clicked()
                         {
                             ui.close_menu();
                             *sink.xref_fn = Some(*idx);
                         }
-                        if ui.button("Copy name").clicked() {
+                        if ui.button(i18n::tr(sink.lang, "Copy name")).clicked() {
                             ui.close_menu();
                             ui.output_mut(|o| {
                                 o.copied_text = f.display_name().to_string();
@@ -2111,32 +2222,34 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                     let r = tok_label(ui, t, C_STR);
                     r.context_menu(|ui| {
                         ui.label(format!("@{addr}"));
-                        if ui.button("Hex dump string").clicked() {
+                        if ui.button(i18n::tr(sink.lang, "Hex dump string")).clicked() {
                             ui.close_menu();
                             *sink.hexreq = Some(HexReq {
-                                title: format!("string @ {addr}"),
+                                title: i18n::trf(sink.lang, "string @ %A", &[("A", addr)]),
                                 addr: *addr,
                                 len: t.len().max(1),
                             });
                         }
-                        ui.menu_button("Xrefs to string", |ui| match l.string_refs.get(addr) {
-                            Some(v) if !v.is_empty() => {
-                                for fi in v.iter().take(30) {
-                                    let f = &l.fns[*fi];
-                                    if ui
-                                        .button(format!("fn[{fi}] {}", f.display_name()))
-                                        .clicked()
-                                    {
-                                        ui.close_menu();
-                                        *sink.jump = Some(*fi);
+                        ui.menu_button(i18n::tr(sink.lang, "Xrefs to string"), |ui| {
+                            match l.string_refs.get(addr) {
+                                Some(v) if !v.is_empty() => {
+                                    for fi in v.iter().take(30) {
+                                        let f = &l.fns[*fi];
+                                        if ui
+                                            .button(format!("fn[{fi}] {}", f.display_name()))
+                                            .clicked()
+                                        {
+                                            ui.close_menu();
+                                            *sink.jump = Some(*fi);
+                                        }
                                     }
                                 }
-                            }
-                            _ => {
-                                ui.label("(none)");
+                                _ => {
+                                    ui.label(i18n::tr(sink.lang, "  (none)"));
+                                }
                             }
                         });
-                        if ui.button("Copy text").clicked() {
+                        if ui.button(i18n::tr(sink.lang, "Copy text")).clicked() {
                             ui.close_menu();
                             ui.output_mut(|o| o.copied_text = t.clone());
                         }
@@ -2157,13 +2270,20 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                         }
                     }
                     r.context_menu(|ui| {
-                        ui.label(format!("operand {t}"));
+                        ui.label(i18n::trf(sink.lang, "operand %T", &[("T", t)]));
                         if let Some(h) = &hint {
                             ui.separator();
                             ui.label(RichText::new(h).monospace());
                         }
                         if let Some(v) = val {
-                            if ui.button(format!("Hex dump memory at {v:#x}")).clicked() {
+                            if ui
+                                .button(i18n::trf(
+                                    sink.lang,
+                                    "Hex dump memory at %X",
+                                    &[("X", &format!("{v:#x}"))],
+                                ))
+                                .clicked()
+                            {
                                 ui.close_menu();
                                 *sink.hexreq = Some(HexReq {
                                     title: format!("{v:#x}"),
@@ -2171,25 +2291,27 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                                     len: 128,
                                 });
                             }
-                            ui.menu_button("Xrefs to address", |ui| match l.const_refs.get(&v) {
-                                Some(v) if !v.is_empty() => {
-                                    for fi in v.iter().take(30) {
-                                        let f = &l.fns[*fi];
-                                        if ui
-                                            .button(format!("fn[{fi}] {}", f.display_name()))
-                                            .clicked()
-                                        {
-                                            ui.close_menu();
-                                            *sink.jump = Some(*fi);
+                            ui.menu_button(i18n::tr(sink.lang, "Xrefs to address"), |ui| {
+                                match l.const_refs.get(&v) {
+                                    Some(v) if !v.is_empty() => {
+                                        for fi in v.iter().take(30) {
+                                            let f = &l.fns[*fi];
+                                            if ui
+                                                .button(format!("fn[{fi}] {}", f.display_name()))
+                                                .clicked()
+                                            {
+                                                ui.close_menu();
+                                                *sink.jump = Some(*fi);
+                                            }
                                         }
                                     }
-                                }
-                                _ => {
-                                    ui.label("(none)");
+                                    _ => {
+                                        ui.label(i18n::tr(sink.lang, "  (none)"));
+                                    }
                                 }
                             });
                         }
-                        if ui.button("Copy value").clicked() {
+                        if ui.button(i18n::tr(sink.lang, "Copy value")).clicked() {
                             ui.close_menu();
                             ui.output_mut(|o| o.copied_text = t.clone());
                         }
@@ -2274,6 +2396,7 @@ fn image_graph_pane(
     l: &Loaded,
     sel: usize,
     tok: &Tok,
+    lang: Lang,
     cam: &mut Cam,
     focus: &mut Option<usize>,
     offsets: &mut HashMap<usize, egui::Vec2>,
@@ -2302,11 +2425,14 @@ fn image_graph_pane(
             let mut w = p_width(ui, f.display_name(), 10.0);
             w = w.max(p_width(
                 ui,
-                &format!(
-                    "{} insns | calls {} | callers {}",
-                    f.len(),
-                    l.callees.get(&f.idx).map_or(0, Vec::len),
-                    l.callers.get(&f.idx).map_or(0, Vec::len)
+                &i18n::trf(
+                    lang,
+                    "%A insns | calls %B | callers %C",
+                    &[
+                        ("A", &f.len()),
+                        ("B", &l.callees.get(&f.idx).map_or(0, Vec::len)),
+                        ("C", &l.callers.get(&f.idx).map_or(0, Vec::len)),
+                    ],
                 ),
                 9.0,
             ));
@@ -2465,11 +2591,14 @@ fn image_graph_pane(
             );
         }
         if z >= 0.55 {
-            let info = format!(
-                "{} insns | calls {} | callers {}",
-                l.fns[i].len(),
-                l.callees.get(&i).map_or(0, Vec::len),
-                l.callers.get(&i).map_or(0, Vec::len)
+            let info = i18n::trf(
+                lang,
+                "%A insns | calls %B | callers %C",
+                &[
+                    ("A", &l.fns[i].len()),
+                    ("B", &l.callees.get(&i).map_or(0, Vec::len)),
+                    ("C", &l.callers.get(&i).map_or(0, Vec::len)),
+                ],
             );
             p.text(
                 srect.left_top() + egui::vec2(4.0, 16.0) * z,
@@ -2502,12 +2631,16 @@ fn image_graph_pane(
         // Per-node interaction: stable id => no flickering tooltip/menu.
         let f = &l.fns[i];
         let nresp = ui.interact(srect, egui::Id::new(("cgnode", i)), Sense::click());
-        let tip = format!(
-            "fn[{i}] {}\ninsns {}, callers {}, calls {}",
-            f.display_name(),
-            f.len(),
-            l.callers.get(&i).map_or(0, Vec::len),
-            l.callees.get(&i).map_or(0, Vec::len)
+        let tip = i18n::trf(
+            lang,
+            "fn[%I] %NAME\ninsns %N, callers %C, calls %K",
+            &[
+                ("I", &i),
+                ("NAME", &f.display_name()),
+                ("N", &f.len()),
+                ("C", &l.callers.get(&i).map_or(0, Vec::len)),
+                ("K", &l.callees.get(&i).map_or(0, Vec::len)),
+            ],
         );
         let nresp = nresp.on_hover_text(tip);
         if nresp.clicked() {
@@ -2519,21 +2652,21 @@ fn image_graph_pane(
         }
         nresp.context_menu(|ui| {
             ui.label(format!("fn[{i}] {}", f.display_name()));
-            if ui.button("Open in Code view").clicked() {
+            if ui.button(i18n::tr(lang, "Open in Code view")).clicked() {
                 ui.close_menu();
                 *jump = Some(i);
                 *open_code = true;
             }
-            if ui.button("Show CFG").clicked() {
+            if ui.button(i18n::tr(lang, "Show CFG")).clicked() {
                 ui.close_menu();
                 *jump = Some(i);
                 *center = CenterTab::DGraph;
             }
-            if ui.button("Center on this node").clicked() {
+            if ui.button(i18n::tr(lang, "Center on this node")).clicked() {
                 ui.close_menu();
                 *focus = Some(i);
             }
-            if ui.button("Copy name").clicked() {
+            if ui.button(i18n::tr(lang, "Copy name")).clicked() {
                 ui.close_menu();
                 ui.output_mut(|o| o.copied_text = f.display_name().to_string());
             }
@@ -2552,6 +2685,7 @@ fn cfg_canvas(
     sel: usize,
     cfg: &qvm::CFG,
     tok: &Tok,
+    lang: Lang,
     cam: &mut Cam,
     offsets: &mut HashMap<(usize, usize), egui::Vec2>,
     drag: &mut Option<usize>,
@@ -2767,11 +2901,14 @@ fn cfg_canvas(
         }
         node_resp.context_menu(|ui| {
             ui.label(format!("B{bi} [{}..{})", b.start, b.end));
-            if ui.button("Scroll Disassembly here").clicked() {
+            if ui
+                .button(i18n::tr(lang, "Scroll Disassembly here"))
+                .clicked()
+            {
                 ui.close_menu();
                 *scroll = Some(b.start);
             }
-            if ui.button("Copy insn range").clicked() {
+            if ui.button(i18n::tr(lang, "Copy insn range")).clicked() {
                 ui.close_menu();
                 ui.output_mut(|o| o.copied_text = format!("{}..{}", b.start, b.end));
             }
@@ -2859,6 +2996,28 @@ mod tests {
     }
 
     #[test]
+    fn i18n_translates_and_falls_back() {
+        // Known translation.
+        assert_eq!(i18n::tr(Lang::Ru, "File"), "Файл");
+        // English is the identity mapping.
+        assert_eq!(i18n::tr(Lang::En, "File"), "File");
+        // Missing translation falls back to the key.
+        assert_eq!(i18n::tr(Lang::Ru, "no such key"), "no such key");
+        // Templates replace %KEY placeholders.
+        assert_eq!(
+            i18n::trf(Lang::Ru, "%A/%B functions", &[("A", &1), ("B", &2)]),
+            "функций: 1/2"
+        );
+        assert_eq!(
+            i18n::trf(Lang::En, "%A/%B functions", &[("A", &1), ("B", &2)]),
+            "1/2 functions"
+        );
+        // Language persistence round trip.
+        assert_eq!(Lang::from_u8(Lang::Ru.as_u8()), Lang::Ru);
+        assert_eq!(Lang::from_u8(200), Lang::En);
+    }
+
+    #[test]
     fn tab_encodings_round_trip() {
         // Direct round trips.
         assert_eq!(CenterTab::from_u8(CenterTab::Code.as_u8()), CenterTab::Code);
@@ -2916,6 +3075,7 @@ mod tests {
             bss_filter: "".into(),
             center: CenterTab::Graph.as_u8(),
             tab: BottomTab::Xrefs.as_u8(),
+            lang: Lang::Ru.as_u8(),
         };
         let json = serde_json::to_string(&s).expect("serialize");
         let back: PersistState = serde_json::from_str(&json).expect("deserialize");
@@ -2924,6 +3084,7 @@ mod tests {
         assert_eq!(back.strings_filter, s.strings_filter);
         assert_eq!(CenterTab::from_u8(back.center), CenterTab::Graph);
         assert_eq!(BottomTab::from_u8(back.tab), BottomTab::Xrefs);
+        assert_eq!(Lang::from_u8(back.lang), Lang::Ru);
 
         // Blobs from older versions (extra/missing fields) still load.
         let legacy = r#"{"path_edit":"a.qvm","filter":"","strings_filter":"",
