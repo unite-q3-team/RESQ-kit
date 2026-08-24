@@ -5,3 +5,4 @@ tools/__pycache__/
 tools/scripts/__pycache__/
 *.qvm
 *.pk3
+target/

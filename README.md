@@ -35,6 +35,7 @@ RESQ is not a Swiss-army knife. It speeds the work up, but it does not turn a `.
 ```
 resq-kit/
   toolchain/qvm/       Rust crate (probe_emit, disasm, seqdiff, …)
+  toolchain/gui/       resq-gui: egui analyzer (function list, disasm + C, strings/traps, renames -> .map)
   tools/win32-qvm/     q3lcc / q3asm (Windows)
   tools/dump.py        strings ±4, identity insn/xref, cvar taint
   tools/qvmbits.py     IEEE i32 ↔ float (and Q3 TFL / CONTENTS)
@@ -67,6 +68,18 @@ python tools\dump.py --qvm work\qagame.qvm --c work\qagame\qagame.c cvar cg_foo
 ```
 
 Bar for a rebuild: `probe_check` on the new QVM; `probe_seqdiff orig.qvm rebuilt.qvm` (qagame), `probe_cgamediff` / `probe_uidiff` for the others.
+
+## GUI
+
+```powershell
+cd toolchain\gui
+cargo run --release --              # or: cargo run --release -- ..\..\work\qagame.qvm
+```
+
+`resq-gui` opens any `.qvm` instantly: function list with filter, side-by-side
+disassembly + identity C, string/trap tabs with one-click xref jumps, and
+function renames saved as a q3asm-compatible `.map` next to the file (all
+probes and `emit_qvm.ps1` pick those names up via `--names`).
 
 ## Needs
 

@@ -1,0 +1,245 @@
+//! Loading + analysis state for the GUI. Pure `qvm` calls, no UI here, so it
+//! stays unit-testable.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use qvm::{disassemble, load, load_map, trap_name, Disassembly, Opcode, Qvm};
+
+/// Per-function metadata collected at load time (mirrors `probe_inventory`).
+pub struct FnInfo {
+    pub idx: usize,
+    pub entry: usize,
+    pub end: usize,
+    /// Editable display name; `None` = unnamed (`fn[idx]` shown instead).
+    pub name: Option<String>,
+    /// `(syscall num, resolved name or "?")` in program order.
+    pub traps: Vec<(u32, String)>,
+    /// Distinct literal strings referenced by this function.
+    pub strings: Vec<String>,
+    /// Lowercased blob for the filter box.
+    pub search: String,
+}
+
+impl FnInfo {
+    pub fn len(&self) -> usize {
+        self.end - self.entry
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.end == self.entry
+    }
+
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or("unnamed")
+    }
+}
+
+/// Everything the UI needs about an opened QVM.
+pub struct Loaded {
+    pub path: PathBuf,
+    pub qvm: Qvm,
+    pub d: Disassembly,
+    /// One enriched text line per instruction (indexed by insn number):
+    /// disasm plus `;` comments for strings, syscalls and call targets.
+    pub lines: Vec<String>,
+    pub fns: Vec<FnInfo>,
+    /// Literal-segment strings: `(vm address, text)` in address order.
+    pub lit_strings: Vec<(i32, String)>,
+    /// String address -> functions referencing it.
+    pub string_refs: BTreeMap<i32, Vec<usize>>,
+    /// Syscall num -> functions performing it.
+    pub trap_users: BTreeMap<u32, Vec<usize>>,
+}
+
+impl Loaded {
+    /// Load a QVM and precompute everything the panes show.
+    pub fn open(path: &Path) -> Result<Loaded, String> {
+        let qvm = load(path).map_err(|e| format!("load: {e}"))?;
+        let mut qvm = qvm;
+        let map_sibling = path.with_extension("map");
+        if map_sibling.is_file() {
+            match load_map(map_sibling.to_str().unwrap_or_default()) {
+                Ok(syms) => {
+                    for (entry, name) in syms {
+                        qvm.names.insert(entry, name);
+                    }
+                }
+                Err(e) => return Err(format!("load {}: {e}", map_sibling.display())),
+            }
+        }
+
+        let d = disassemble(&qvm).map_err(|e| format!("disasm: {e}"))?;
+
+        // Enriched disasm lines in one pass.
+        let mut lines: Vec<String> = Vec::with_capacity(d.insns.len());
+        for i in 0..d.insns.len() {
+            let ins = &d.insns[i];
+            let mut line = format!("{ins}");
+            if ins.op == Opcode::Const {
+                if let Some(opd) = ins.operand {
+                    if let Some(s) = qvm.string_at(opd) {
+                        line.push_str(&format!("  ; \"{s}\""));
+                    }
+                    if let Some(next) = d.insns.get(i + 1) {
+                        if next.op == Opcode::Call && opd < 0 {
+                            let num = (-1 - opd) as u32;
+                            match trap_name(qvm.module, num) {
+                                Some(n) => line.push_str(&format!("  ; syscall {num} {n}")),
+                                None => line.push_str(&format!("  ; syscall {num}")),
+                            }
+                        } else if next.op == Opcode::Call && opd >= 0 {
+                            let t = opd as usize;
+                            match qvm.name_for_fn(t) {
+                                Some(n) => line.push_str(&format!("  ; call {n}")),
+                                None => line.push_str(&format!("  ; call fn@{t}")),
+                            }
+                        }
+                    }
+                }
+            }
+            lines.push(line);
+        }
+
+        let ranges = qvm::build_functions(&d);
+        let mut fns = Vec::with_capacity(ranges.len());
+        let mut string_refs: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+        let mut trap_users: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+
+        for (idx, &(start, end)) in ranges.iter().enumerate() {
+            let mut traps = Vec::new();
+            let mut strings = Vec::new();
+            for (k, ins) in d.insns[start..end].iter().enumerate() {
+                let Some(opd) = ins.operand else { continue };
+                if ins.op != Opcode::Const {
+                    continue;
+                }
+                if let Some(s) = qvm.string_at(opd) {
+                    if !strings.contains(&s) {
+                        strings.push(s.clone());
+                    }
+                    string_refs.entry(opd).or_default().push(idx);
+                }
+                if opd < 0 {
+                    if let Some(next) = d.insns[start..end].get(k + 1) {
+                        if next.op == Opcode::Call {
+                            let num = (-1 - opd) as u32;
+                            let n = trap_name(qvm.module, num).unwrap_or("?").to_string();
+                            if !traps.contains(&(num, n.clone())) {
+                                traps.push((num, n));
+                            }
+                            trap_users.entry(num).or_default().push(idx);
+                        }
+                    }
+                }
+            }
+
+            let name = qvm.name_for_fn(start).map(str::to_string);
+            let mut search = name.clone().unwrap_or_default();
+            search.push_str(&format!(" fn{idx} {start} "));
+            for (n, tn) in &traps {
+                search.push_str(&format!("{n} {tn} "));
+            }
+            for s in &strings {
+                search.push_str(s);
+                search.push(' ');
+            }
+            fns.push(FnInfo {
+                idx,
+                entry: start,
+                end,
+                name,
+                traps,
+                strings,
+                search: search.to_lowercase(),
+            });
+        }
+
+        // Literal-segment string table (address order).
+        let mut lit_strings = Vec::new();
+        let base = qvm.data_length;
+        let top = qvm.data_length + qvm.lit_length;
+        let mut a = base;
+        while a < top {
+            match qvm.string_at(a) {
+                Some(s) => {
+                    let step = s.len() as i32 + 1;
+                    lit_strings.push((a, s));
+                    a += step.max(1);
+                }
+                None => a += 1,
+            }
+        }
+
+        Ok(Loaded {
+            path: path.to_path_buf(),
+            qvm,
+            d,
+            lines,
+            fns,
+            lit_strings,
+            string_refs,
+            trap_users,
+        })
+    }
+
+    /// Decompiled identity C for one function (uncached; the GUI caches).
+    pub fn decompile(&self, idx: usize) -> Result<String, String> {
+        let f = self.fns.get(idx).ok_or("bad fn index")?;
+        let data = self.qvm.data_int32();
+        let cfg = qvm::build_cfg(&self.d, (f.entry, f.end), &data).ok_or("degenerate CFG")?;
+        let frame = self.d.insns[cfg.entry].operand.unwrap_or(0);
+        let fun = qvm::decompile_function(&self.d, &cfg, frame, &data);
+        Ok(qvm::fmt_function(&fun, &self.qvm))
+    }
+
+    /// Disasm pane slice for one function (instruction-index range).
+    pub fn fn_range(&self, idx: usize) -> Option<std::ops::Range<usize>> {
+        let f = self.fns.get(idx)?;
+        Some(f.entry..f.end)
+    }
+
+    /// Persist renames as a q3asm-compatible `.map` next to the QVM.
+    pub fn save_map(&self) -> Result<PathBuf, String> {
+        let mut named: Vec<(usize, &str)> = self
+            .fns
+            .iter()
+            .filter_map(|f| f.name.as_deref().map(|n| (f.entry, n)))
+            .collect();
+        named.sort_by_key(|&(e, _)| e);
+        let out = self.path.with_extension("map");
+        let mut text = String::from("# resq-gui renames (q3asm -m compatible)\n");
+        for (entry, name) in named {
+            text.push_str(&format!("0 {entry:x} {name}\n"));
+        }
+        std::fs::write(&out, text).map_err(|e| format!("write {}: {e}", out.display()))?;
+        Ok(out)
+    }
+
+    /// Apply a rename from the UI.
+    pub fn rename(&mut self, idx: usize, new_name: &str) {
+        let Some(f) = self.fns.get_mut(idx) else {
+            return;
+        };
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() {
+            f.name = None;
+            self.qvm.names.remove(&f.entry);
+        } else {
+            f.name = Some(trimmed.to_string());
+            self.qvm.names.insert(f.entry, trimmed.to_string());
+        }
+        f.search = {
+            let mut s = f.name.clone().unwrap_or_default();
+            s.push_str(&format!(" fn{} {} ", f.idx, f.entry));
+            for (n, tn) in &f.traps {
+                s.push_str(&format!("{n} {tn} "));
+            }
+            for st in &f.strings {
+                s.push_str(st);
+                s.push(' ');
+            }
+            s.to_lowercase()
+        };
+    }
+}

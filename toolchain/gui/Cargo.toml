@@ -1,0 +1,13 @@
+[package]
+name = "resq-gui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Interactive QVM analyzer GUI for the RESQ kit"
+
+[dependencies]
+qvm = { path = "../qvm" }
+eframe = "0.29"
+
+[profile.release]
+opt-level = 2

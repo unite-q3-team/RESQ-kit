@@ -33,6 +33,7 @@ RESQ — не швейцарский нож. Он ускоряет работу,
 ```
 resq-kit/
   toolchain/qvm/       Rust crate (probe_emit, disasm, seqdiff, …)
+  toolchain/gui/       resq-gui: egui-анализатор (список функций, disasm + C, строки/traps, переименования -> .map)
   tools/win32-qvm/     q3lcc / q3asm (Windows)
   tools/dump.py        strings ±4, identity insn/xref, cvar taint
   tools/qvmbits.py     IEEE i32 ↔ float (and Q3 TFL / CONTENTS)
@@ -65,6 +66,18 @@ python tools\dump.py --qvm work\qagame.qvm --c work\qagame\qagame.c cvar cg_foo
 ```
 
 Приёмка пересборки: `probe_check` на новом QVM; `probe_seqdiff orig.qvm rebuilt.qvm` (qagame), `probe_cgamediff` / `probe_uidiff` для остальных.
+
+## GUI
+
+```powershell
+cd toolchain\gui
+cargo run --release --              # или: cargo run --release -- ..\..\work\qagame.qvm
+```
+
+`resq-gui` мгновенно открывает любой `.qvm`: список функций с фильтром, disasm и
+identity C рядом, вкладки строк/ловушек с переходом по кросс-ссылкам в один
+клик, переименования функций сохраняются в q3asm-совместимый `.map` рядом с
+файлом (все probe'ы и `emit_qvm.ps1` подхватывают их через `--names`).
 
 ## Требования
 
