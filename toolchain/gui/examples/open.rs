@@ -29,4 +29,21 @@ fn main() {
         c.text.lines().count(),
         t1.elapsed()
     );
+    // Memory hints for the first CONST operands of that function.
+    println!("mem hints:");
+    let mut shown = 0;
+    let range = l.fn_range(big).unwrap_or(0..0);
+    for ins in &l.d.insns[range] {
+        if shown >= 8 {
+            break;
+        }
+        if ins.op != qvm::Opcode::Const {
+            continue;
+        }
+        let Some(v) = ins.operand else { continue };
+        if let Some(h) = l.mem_hint(v) {
+            println!("  {h}");
+            shown += 1;
+        }
+    }
 }

@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use eframe::egui;
 use egui::{Color32, RichText, Sense, TextWrapMode};
+use qvm::Opcode;
 
 use crate::state::{escape, insn_bytes, opcode_help, Decompiled, Loaded};
 
@@ -286,6 +287,9 @@ struct Sink<'a> {
     flash: &'a mut Option<usize>,
     /// Label insn clicked in Identity C: scroll C pane to `L<n>:` + flash.
     c_goto: &'a mut Option<usize>,
+    /// Allow hover hints on address tokens (Identity C pane only — the
+    /// Disassembly row tooltip owns hover there).
+    token_hints: bool,
 }
 
 pub struct App {
@@ -1614,6 +1618,7 @@ impl App {
                                 xref_fn: &mut xref_loc,
                                 flash: &mut flash_loc,
                                 c_goto: &mut c_goto_loc,
+                                token_hints: false,
                             };
                             render_row(ui, l, &segs, &mut sink);
                             // Instruction help tooltip. Created last => on top
@@ -1628,6 +1633,15 @@ impl App {
                                 "\naddr {:#x}, {} bytes",
                                 ins.addr, ins.size
                             ));
+                            // What a CONST points at in VM memory.
+                            if ins.op == Opcode::Const {
+                                if let Some(v) = ins.operand {
+                                    if let Some(h) = l.mem_hint(v) {
+                                        help.push('\n');
+                                        help.push_str(&h);
+                                    }
+                                }
+                            }
                             ui.interact(row, egui::Id::new(("drow", ii)), Sense::hover())
                                 .on_hover_text(help);
                         }
@@ -1663,6 +1677,7 @@ impl App {
                                 xref_fn: &mut xref_loc,
                                 flash: &mut flash_loc,
                                 c_goto: &mut c_goto_loc,
+                                token_hints: true,
                             };
                             render_row(ui, l, &segs, &mut sink);
                             // Hover/click a C line -> highlight its instructions.
@@ -2033,6 +2048,15 @@ fn pointer_in(ui: &egui::Ui, resp: &egui::Response) -> bool {
         .is_some_and(|p| resp.rect.contains(p))
 }
 
+/// Parse a numeric token: decimal or 0x-prefixed hex.
+fn parse_num(t: &str) -> Option<i32> {
+    if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        i32::from_str_radix(h, 16).ok()
+    } else {
+        t.parse::<i32>().ok()
+    }
+}
+
 /// Render one source line as a single horizontal run of tight tokens.
 fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
     ui.horizontal(|ui| {
@@ -2119,10 +2143,25 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                     });
                 }
                 Seg::NumTok(t) => {
-                    let val = t.parse::<i32>().ok();
+                    let val = parse_num(t);
+                    let hint = val.and_then(|v| l.mem_hint(v));
                     let r = tok_label(ui, t, C_NUM);
+                    // Hover hint for memory addresses. Enabled only in the
+                    // Identity C pane (token_hints): in Disassembly the row
+                    // tooltip carries the opcode help and would conflict.
+                    if sink.token_hints {
+                        if let Some(h) = &hint {
+                            if pointer_in(ui, &r) {
+                                r.show_tooltip_text(RichText::new(h).monospace());
+                            }
+                        }
+                    }
                     r.context_menu(|ui| {
                         ui.label(format!("operand {t}"));
+                        if let Some(h) = &hint {
+                            ui.separator();
+                            ui.label(RichText::new(h).monospace());
+                        }
                         if let Some(v) = val {
                             if ui.button(format!("Hex dump memory at {v:#x}")).clicked() {
                                 ui.close_menu();
@@ -2132,6 +2171,23 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                                     len: 128,
                                 });
                             }
+                            ui.menu_button("Xrefs to address", |ui| match l.const_refs.get(&v) {
+                                Some(v) if !v.is_empty() => {
+                                    for fi in v.iter().take(30) {
+                                        let f = &l.fns[*fi];
+                                        if ui
+                                            .button(format!("fn[{fi}] {}", f.display_name()))
+                                            .clicked()
+                                        {
+                                            ui.close_menu();
+                                            *sink.jump = Some(*fi);
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    ui.label("(none)");
+                                }
+                            });
                         }
                         if ui.button("Copy value").clicked() {
                             ui.close_menu();
@@ -2791,6 +2847,15 @@ mod tests {
         assert!(flash_tint(Some((7, now)), 7).is_some());
         let old = std::time::Instant::now() - std::time::Duration::from_secs(2);
         assert_eq!(flash_tint(Some((7, old)), 7), None);
+    }
+
+    #[test]
+    fn parse_num_handles_decimal_and_hex() {
+        assert_eq!(parse_num("42"), Some(42));
+        assert_eq!(parse_num("0x2441c"), Some(0x2441c));
+        assert_eq!(parse_num("0X10"), Some(16));
+        assert_eq!(parse_num("0xzz"), None);
+        assert_eq!(parse_num("abc"), None);
     }
 
     #[test]

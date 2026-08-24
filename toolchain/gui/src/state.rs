@@ -204,6 +204,9 @@ pub struct Loaded {
     pub bss_range: (i32, i32),
     /// BSS address referenced by CONST -> functions referencing it.
     pub bss_refs: BTreeMap<i32, Vec<usize>>,
+    /// Any CONST memory operand (not a call target) -> functions
+    /// referencing it. Backs the `mem_hint` tooltips and address xrefs.
+    pub const_refs: BTreeMap<i32, Vec<usize>>,
 }
 
 impl Loaded {
@@ -437,6 +440,33 @@ impl Loaded {
             .map(|(k, v)| (k, v.into_iter().collect()))
             .collect();
 
+        // References to any memory address loaded via CONST (data / lit /
+        // BSS globals). CONST immediately followed by CALL is a call target,
+        // not memory.
+        let mut const_refs: BTreeMap<i32, std::collections::BTreeSet<usize>> = BTreeMap::new();
+        for (idx, &(start, end)) in ranges.iter().enumerate() {
+            for (k, ins) in d.insns[start..end].iter().enumerate() {
+                if ins.op != Opcode::Const {
+                    continue;
+                }
+                let Some(opd) = ins.operand else { continue };
+                if opd < 4 {
+                    continue;
+                }
+                let calls_next = d
+                    .insns
+                    .get(start + k + 1)
+                    .is_some_and(|n| n.op == Opcode::Call);
+                if !calls_next {
+                    const_refs.entry(opd).or_default().insert(idx);
+                }
+            }
+        }
+        let const_refs: BTreeMap<i32, Vec<usize>> = const_refs
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect()))
+            .collect();
+
         Ok(Loaded {
             path: path.to_path_buf(),
             qvm,
@@ -455,6 +485,7 @@ impl Loaded {
             fn_ranges,
             bss_range,
             bss_refs,
+            const_refs,
         })
     }
 
@@ -491,6 +522,73 @@ impl Loaded {
         } else {
             0 // bss
         }
+    }
+
+    fn mem_i32(&self, addr: i32) -> i32 {
+        i32::from_le_bytes([
+            self.mem_byte(addr),
+            self.mem_byte(addr.wrapping_add(1)),
+            self.mem_byte(addr.wrapping_add(2)),
+            self.mem_byte(addr.wrapping_add(3)),
+        ])
+    }
+
+    /// Human-readable hint for a VM memory address: which segment it falls
+    /// into (data / lit / BSS), what currently lives there (C string, 32-bit
+    /// value, pointer to a string, runtime global) and how many functions
+    /// reference it. `None` for anything outside VM memory (call targets,
+    /// syscalls, the NULL-sentinel word at 0..4).
+    pub fn mem_hint(&self, addr: i32) -> Option<String> {
+        if addr < 4 {
+            return None;
+        }
+        let q = &self.qvm;
+        let lit_end = q.data_length + q.lit_length;
+        let seg = if addr < q.data_length {
+            "data"
+        } else if addr < lit_end {
+            "lit"
+        } else if addr < lit_end + q.bss_length {
+            "BSS"
+        } else {
+            return None;
+        };
+
+        let quote = |s: &str| -> String {
+            let mut shown: String = s.chars().take(48).collect();
+            if s.chars().count() > 48 {
+                shown.push('…');
+            }
+            format!("\"{}\"", escape(&shown))
+        };
+
+        let mut hint = format!("[{addr:#x}] {seg}");
+        if let Some(s) = q.string_at(addr) {
+            hint.push_str(&format!(" = {}", quote(&s)));
+        } else if seg == "BSS" {
+            hint.push_str(" = runtime global (zero at load)");
+        } else {
+            let v = self.mem_i32(addr);
+            if v > 4 {
+                if let Some(s) = q.string_at(v) {
+                    hint.push_str(&format!(" = ptr -> {}", quote(&s)));
+                    return Some(hint);
+                }
+            }
+            hint.push_str(&format!(" = {v} (0x{v:08x})"));
+            // Data globals are often float constants (lcc does not 16-align
+            // anything): show the f32 reading when the bits are sane.
+            let f = f32::from_bits(v as u32);
+            if f.is_finite() && f.abs() >= 1e-6 && f.abs() <= 1e9 {
+                hint.push_str(&format!(" / {f} f32"));
+            }
+        }
+        if let Some(r) = self.const_refs.get(&addr) {
+            if !r.is_empty() {
+                hint.push_str(&format!("\nreferenced by {} fn(s)", r.len()));
+            }
+        }
+        Some(hint)
     }
 
     /// Decompiled identity C for one function (uncached; the GUI caches).
@@ -603,5 +701,52 @@ mod tests {
         assert_eq!(escape("\u{1}"), "\\x01");
         // Non-ASCII passes through untouched.
         assert_eq!(escape("привет"), "привет");
+    }
+
+    #[test]
+    fn mem_hint_classifies_segments_and_rejects_non_memory() {
+        // Smoke fixture: data/lit empty, BSS covers [0, 64).
+        let dir = std::env::temp_dir().join(format!("resq_gui_hint_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("hint.qvm");
+        let code = {
+            let mut c = vec![3u8]; // ENTER 16
+            c.extend_from_slice(&16i32.to_le_bytes());
+            c.push(4); // LEAVE 16
+            c.extend_from_slice(&16i32.to_le_bytes());
+            c
+        };
+        let header: [i32; 8] = [
+            qvm::loader::VM_MAGIC as i32,
+            2,
+            32,
+            code.len() as i32,
+            32 + code.len() as i32,
+            0,  // dataLength
+            0,  // litLength
+            64, // bssLength
+        ];
+        let mut bytes = Vec::new();
+        for v in header {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        bytes.extend_from_slice(&code);
+        std::fs::write(&path, &bytes).expect("write");
+
+        let l = Loaded::open(&path).expect("open");
+        // NULL sentinel and outside-of-memory addresses get no hint.
+        assert_eq!(l.mem_hint(0), None);
+        assert_eq!(l.mem_hint(-1), None);
+        // Call target (inside code, beyond data+lit+bss) gets no hint.
+        assert_eq!(l.mem_hint(10_000), None);
+        // BSS address: classified + zero-at-load note.
+        let h = l.mem_hint(0x24).expect("bss hint");
+        assert!(h.starts_with("[0x24] BSS"), "{h}");
+        assert!(h.contains("zero at load"), "{h}");
+        // No CONST refs in the trivial fixture.
+        assert!(l.const_refs.is_empty());
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
     }
 }
