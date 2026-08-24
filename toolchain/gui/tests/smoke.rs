@@ -50,7 +50,7 @@ fn open_rename_save_reload() {
 
     // decompile works on the trivial function
     let c = l.decompile(0).expect("decompile");
-    assert!(!c.is_empty());
+    assert!(!c.0.is_empty());
 
     // rename -> save map -> reload picks the name up
     l.rename(0, "Smoke_Main");
