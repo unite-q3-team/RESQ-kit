@@ -1,0 +1,7 @@
+toolchain/qvm/target/
+work/**
+!work/.gitkeep
+tools/__pycache__/
+tools/scripts/__pycache__/
+*.qvm
+*.pk3
