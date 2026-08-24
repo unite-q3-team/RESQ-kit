@@ -35,6 +35,19 @@ impl FnInfo {
     }
 }
 
+/// Whole-image call graph layout: layered columns by call depth.
+pub struct CallGraph {
+    /// Call depth (column index) per fn idx.
+    pub depth: Vec<usize>,
+    /// Row within the column, per fn idx.
+    pub row: Vec<usize>,
+    /// Functions nobody calls (entry points).
+    pub roots: Vec<usize>,
+    pub max_depth: usize,
+    /// Column occupancy (rows per depth).
+    pub col_len: Vec<usize>,
+}
+
 /// Everything the UI needs about an opened QVM.
 pub struct Loaded {
     pub path: PathBuf,
@@ -60,6 +73,8 @@ pub struct Loaded {
     pub name_to_idx: HashMap<String, usize>,
     /// All syscall names seen in this module (for syntax highlighting).
     pub trap_names: HashSet<String>,
+    /// Whole-image call graph layout.
+    pub callgraph: CallGraph,
 }
 
 impl Loaded {
@@ -225,6 +240,57 @@ impl Loaded {
             .map(|(k, v)| (k, v.into_iter().collect()))
             .collect();
 
+        // Whole-image call graph layout: BFS depth from the roots.
+        let n = fns.len();
+        let mut cg = CallGraph {
+            depth: vec![0; n],
+            row: vec![0; n],
+            roots: Vec::new(),
+            max_depth: 0,
+            col_len: Vec::new(),
+        };
+        for i in 0..n {
+            if callers.get(&i).is_none_or(|v| v.is_empty()) {
+                cg.roots.push(i);
+            }
+        }
+        let mut seen = vec![false; n];
+        let mut queue = std::collections::VecDeque::new();
+        for &r in &cg.roots {
+            if !seen[r] {
+                seen[r] = true;
+                queue.push_back(r);
+            }
+        }
+        if queue.is_empty() && n > 0 {
+            // Everything inside a call cycle: start anywhere.
+            seen[0] = true;
+            queue.push_back(0);
+        }
+        while let Some(c) = queue.pop_front() {
+            for t in callees.get(&c).into_iter().flatten() {
+                if *t < n && !seen[*t] {
+                    seen[*t] = true;
+                    cg.depth[*t] = cg.depth[c] + 1;
+                    queue.push_back(*t);
+                }
+            }
+        }
+        // Functions reachable only through cycles: one extra shared column.
+        let park = cg.depth.iter().copied().max().unwrap_or(0) + 1;
+        for (i, s) in seen.iter().enumerate() {
+            if !s {
+                cg.depth[i] = park;
+            }
+        }
+        cg.max_depth = cg.depth.iter().copied().max().unwrap_or(0);
+        let mut rows_by_col: Vec<usize> = vec![0; cg.max_depth + 1];
+        for (i, d) in cg.depth.iter().enumerate() {
+            cg.row[i] = rows_by_col[*d];
+            rows_by_col[*d] += 1;
+        }
+        cg.col_len = rows_by_col;
+
         Ok(Loaded {
             path: path.to_path_buf(),
             qvm,
@@ -239,6 +305,7 @@ impl Loaded {
             entry_to_idx,
             name_to_idx,
             trap_names,
+            callgraph: cg,
         })
     }
 

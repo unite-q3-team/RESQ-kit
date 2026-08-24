@@ -26,6 +26,14 @@ enum CenterTab {
     Graph,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum GraphMode {
+    /// Whole-image call graph (all functions).
+    Image,
+    /// CFG of the selected function.
+    Cfg,
+}
+
 // ---------------------------------------------------------------------------
 // Syntax palette (dark-theme friendly)
 // ---------------------------------------------------------------------------
@@ -78,6 +86,12 @@ pub struct App {
     status: String,
     tab: BottomTab,
     center: CenterTab,
+    graph_mode: GraphMode,
+    /// Call-graph view transform (world -> screen: `scr = pan + world * zoom`).
+    graph_zoom: f32,
+    graph_pan: egui::Vec2,
+    /// Fit the call graph to the window on first show after load.
+    graph_fit: bool,
     /// Pending scroll request for the disasm pane (insn index).
     scroll_to: Option<usize>,
     /// Cross-pane highlight state, kept between frames.
@@ -97,6 +111,10 @@ impl App {
             status: "open a .qvm (button, path field, or drag & drop)".into(),
             tab: BottomTab::Strings,
             center: CenterTab::Code,
+            graph_mode: GraphMode::Image,
+            graph_zoom: 1.0,
+            graph_pan: egui::Vec2::ZERO,
+            graph_fit: true,
             scroll_to: None,
             hover_fn: None,
             hover_tok: None,
@@ -123,6 +141,7 @@ impl App {
                 self.scroll_to = l.fns.first().map(|f| f.entry);
                 self.hover_fn = None;
                 self.hover_tok = None;
+                self.graph_fit = true;
                 self.loaded = Some(l);
             }
             Err(e) => self.status = e,
@@ -460,6 +479,7 @@ impl App {
 
             // Locals collected inside the panes; applied after building.
             let mut jump_loc: Option<usize> = None;
+            let mut open_code = false;
             let scroll_req: Option<usize> = self.scroll_to.take();
             let mut pending_scroll: Option<usize> = None;
             let hover_fn_prev = self.hover_fn;
@@ -522,21 +542,68 @@ impl App {
                             }
                         });
                 }),
-                CenterTab::Graph => match cfg_res {
-                    Some(Ok(cfg)) => {
-                        graph_pane(ui, l, sel, &cfg, &mut pending_scroll, &mut jump_loc)
+                CenterTab::Graph => {
+                    ui.horizontal(|ui| {
+                        ui.label("Graph:");
+                        if ui
+                            .selectable_label(self.graph_mode == GraphMode::Image, "Image")
+                            .clicked()
+                        {
+                            self.graph_mode = GraphMode::Image;
+                        }
+                        if ui
+                            .selectable_label(
+                                self.graph_mode == GraphMode::Cfg,
+                                format!("Cfg fn[{sel}]"),
+                            )
+                            .clicked()
+                        {
+                            self.graph_mode = GraphMode::Cfg;
+                        }
+                        ui.separator();
+                        if self.graph_mode == GraphMode::Image {
+                            ui.monospace(format!(
+                                "whole image: {} functions, {} roots — drag to pan, scroll to zoom, click to select, double-click to open",
+                                l.fns.len(),
+                                l.callgraph.roots.len()
+                            ));
+                        } else {
+                            ui.monospace("click a block to scroll Disassembly");
+                        }
+                    });
+                    ui.separator();
+                    match self.graph_mode {
+                        GraphMode::Image => image_graph_pane(
+                            ui,
+                            l,
+                            sel,
+                            &mut self.graph_zoom,
+                            &mut self.graph_pan,
+                            &mut self.graph_fit,
+                            &mut pending_scroll,
+                            &mut jump_loc,
+                            &mut open_code,
+                        ),
+                        GraphMode::Cfg => match cfg_res {
+                            Some(Ok(cfg)) => {
+                                graph_pane(ui, l, sel, &cfg, &mut pending_scroll, &mut jump_loc)
+                            }
+                            Some(Err(e)) => {
+                                ui.colored_label(Color32::LIGHT_RED, format!("CFG error: {e}"));
+                            }
+                            None => unreachable!("graph tab implies cfg"),
+                        },
                     }
-                    Some(Err(e)) => {
-                        ui.colored_label(Color32::LIGHT_RED, format!("CFG error: {e}"));
-                    }
-                    None => unreachable!("graph tab implies cfg"),
-                },
+                }
             }
 
             // Apply collected actions.
             self.hover_fn = new_hover_fn;
             self.hover_tok = new_hover_tok;
             self.scroll_to = pending_scroll;
+            if open_code {
+                self.center = CenterTab::Code;
+            }
             if let Some(j) = jump_loc {
                 self.apply_jump(Some(j));
             }
@@ -884,9 +951,188 @@ fn render_segs_c(
 }
 
 // ---------------------------------------------------------------------------
+// Whole-image call graph
+// ---------------------------------------------------------------------------
+
+/// Whole-image call graph: pan (drag), zoom (scroll), click to select,
+/// double-click to open the function in the Code view.
+#[allow(clippy::too_many_arguments)]
+fn image_graph_pane(
+    ui: &mut egui::Ui,
+    l: &Loaded,
+    sel: usize,
+    zoom: &mut f32,
+    pan: &mut egui::Vec2,
+    fit: &mut bool,
+    scroll: &mut Option<usize>,
+    jump: &mut Option<usize>,
+    open_code: &mut bool,
+) {
+    const W: f32 = 150.0;
+    const H: f32 = 26.0;
+    const GX: f32 = 44.0;
+    const GY: f32 = 12.0;
+    const M: f32 = 12.0;
+
+    let cg = &l.callgraph;
+    let n = l.fns.len();
+    // World-space node positions.
+    let pos = |i: usize| -> egui::Vec2 {
+        egui::Vec2::new(
+            M + cg.depth[i] as f32 * (W + GX),
+            M + cg.row[i] as f32 * (H + GY),
+        )
+    };
+    let total_w = M + (cg.max_depth + 1) as f32 * (W + GX);
+    let total_h = M + cg.col_len.iter().copied().max().unwrap_or(1) as f32 * (H + GY);
+
+    let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+
+    // Initial fit: zoom so the whole image is visible.
+    if *fit {
+        *fit = false;
+        let fit_w = rect.width() / total_w;
+        let fit_h = rect.height() / total_h;
+        *zoom = fit_w.min(fit_h).clamp(0.03, 1.0);
+        *pan = egui::Vec2::new(8.0, 8.0);
+    }
+
+    // Zoom around the pointer.
+    if let Some(pointer) = resp.hover_pos() {
+        let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
+        if scroll_y != 0.0 {
+            let k = (scroll_y * 0.0015).clamp(-0.25, 0.25);
+            let old = *zoom;
+            *zoom = (*zoom * (1.0 + k)).clamp(0.03, 2.5);
+            let rel = pointer - rect.min - *pan;
+            let world = rel / old;
+            *pan = pointer - rect.min - world * *zoom;
+        }
+    }
+    // Pan by drag.
+    if resp.dragged() {
+        *pan += resp.drag_delta();
+    }
+
+    let to_screen = |w: egui::Vec2| rect.min + *pan + w * *zoom;
+    let clip = ui.clip_rect();
+
+    let p = ui.painter();
+
+    // Edges (caller -> callee), culled.
+    let edge_color = Color32::from_rgba_unmultiplied(110, 118, 128, 140);
+    if *zoom >= 0.08 {
+        for (caller, callees_list) in &l.callees {
+            let a = to_screen(pos(*caller) + egui::vec2(W, H / 2.0));
+            for &t in callees_list {
+                let b = to_screen(pos(t));
+                let b = egui::Pos2::new(b.x, b.y + H / 2.0);
+                let lo = a.min(b);
+                let hi = a.max(b);
+                let bound = egui::Rect::from_min_max(lo, hi);
+                if !clip.intersects(bound) {
+                    continue;
+                }
+                let mid_x = (a.x + b.x) / 2.0;
+                let shape = egui::epaint::CubicBezierShape {
+                    points: [
+                        a,
+                        egui::Pos2::new(mid_x, a.y),
+                        egui::Pos2::new(mid_x, b.y),
+                        b,
+                    ],
+                    closed: false,
+                    fill: Color32::TRANSPARENT,
+                    stroke: egui::Stroke::new(1.0, edge_color).into(),
+                };
+                p.add(shape);
+            }
+        }
+    }
+
+    // Nodes, culled; hit-testing.
+    let mut hit: Option<usize> = None;
+    let pointer_world = resp.hover_pos().map(|h| (h - rect.min - *pan) / *zoom);
+    for i in 0..n {
+        let w0 = pos(i);
+        let s0 = to_screen(w0);
+        let srect = egui::Rect::from_min_size(s0, egui::vec2(W * *zoom, H * *zoom));
+        if !clip.intersects(srect) {
+            continue;
+        }
+        if let Some(pw) = pointer_world {
+            let wrect = egui::Rect::from_min_size(w0.to_pos2(), egui::vec2(W, H));
+            if wrect.contains(pw.to_pos2()) {
+                hit = Some(i);
+            }
+        }
+        let named = l.fns[i].name.is_some();
+        let root = cg.depth[i] == 0;
+        let bg = if i == sel {
+            Color32::from_rgb(70, 62, 28)
+        } else if named {
+            Color32::from_rgb(44, 50, 60)
+        } else {
+            Color32::from_rgb(36, 40, 46)
+        };
+        p.rect_filled(srect, 2.0, bg);
+        let border = if i == sel {
+            C_FN
+        } else if root {
+            C_LBL
+        } else {
+            Color32::from_rgb(70, 78, 90)
+        };
+        p.rect_stroke(srect, 2.0, egui::Stroke::new(1.0, border));
+        if *zoom >= 0.30 {
+            let label = l.fns[i].display_name();
+            let label = if label.chars().count() > 20 {
+                format!("{}…", label.chars().take(19).collect::<String>())
+            } else {
+                label.to_string()
+            };
+            let color = if named { C_FN } else { C_DIM };
+            p.text(
+                srect.left_top() + egui::vec2(4.0, 3.0),
+                egui::Align2::LEFT_TOP,
+                label,
+                egui::FontId::monospace(10.0),
+                color,
+            );
+        }
+    }
+
+    // Hover tooltip + click handling.
+    if let Some(h) = hit {
+        let f = &l.fns[h];
+        let tip = format!(
+            "fn[{h}] {}\ninsns {}, callers {}, calls {}",
+            f.display_name(),
+            f.len(),
+            l.callers.get(&h).map_or(0, Vec::len),
+            l.callees.get(&h).map_or(0, Vec::len)
+        );
+        let resp = resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_ui(|ui| {
+                ui.monospace(tip);
+            });
+        if resp.clicked() {
+            *jump = Some(h);
+        }
+        if resp.double_clicked() {
+            *jump = Some(h);
+            *open_code = true;
+        }
+    }
+    let _ = scroll;
+}
+
+// ---------------------------------------------------------------------------
 // CFG graph pane
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::needless_pass_by_ref_mut)]
 fn short_insn(line: &str) -> String {
     // Strip `#idx @0xaddr ` prefix and trailing comment.
     let mut it = line.splitn(3, ' ');
