@@ -77,11 +77,15 @@ cargo run --release --              # or: cargo run --release -- ..\..\work\qaga
 ```
 
 `resq-gui` opens any `.qvm` instantly: function list with filter, side-by-side
-disassembly + identity C with syntax highlighting, CFG graph view, string/trap
-tabs with one-click xref jumps, an xref tab (callers/callees), double-click
-navigation between C calls and functions, cross-pane hover highlighting, and
-function renames saved as a q3asm-compatible `.map` next to the file (all
-probes and `emit_qvm.ps1` pick those names up via `--names`).
+disassembly + identity C with syntax highlighting, a whole-image call graph
+(starts at `vmMain`, drag to pan, scroll to zoom) and a per-function CFG graph
+with full disasm + hex opcode bytes in each node, string/trap tabs with
+one-click xref jumps, an xref tab (callers/callees), double-click navigation
+between C calls and functions, cross-pane hover highlighting, back/forward
+navigation history (Backspace / Alt+Right), and function renames saved as a
+q3asm-compatible `.map` next to the file (all probes and `emit_qvm.ps1` pick
+those names up via `--names`). Menubar: File / View / Tools (exports:
+disassembly `.txt`, identity C per function or for all functions).
 
 ## Needs
 

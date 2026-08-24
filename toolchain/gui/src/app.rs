@@ -97,6 +97,11 @@ pub struct App {
     /// Cross-pane highlight state, kept between frames.
     hover_fn: Option<usize>,
     hover_tok: Option<String>,
+    /// Navigation history (back / forward), like IDA's Alt+Left/Right.
+    hist: Vec<usize>,
+    hist_fwd: Vec<usize>,
+    /// Pending "center call graph on this function" request.
+    graph_focus: Option<usize>,
 }
 
 impl App {
@@ -118,6 +123,9 @@ impl App {
             scroll_to: None,
             hover_fn: None,
             hover_tok: None,
+            hist: Vec::new(),
+            hist_fwd: Vec::new(),
+            graph_focus: None,
         };
         if !app.path_edit.is_empty() {
             app.load_path(&app.path_edit.clone());
@@ -142,20 +150,49 @@ impl App {
                 self.hover_fn = None;
                 self.hover_tok = None;
                 self.graph_fit = true;
+                self.hist.clear();
+                self.hist_fwd.clear();
+                self.graph_focus = Some(l.entry_fn());
                 self.loaded = Some(l);
             }
             Err(e) => self.status = e,
         }
     }
 
-    fn apply_jump(&mut self, jump: Option<usize>) {
-        let Some(idx) = jump else { return };
-        if let Some(l) = &self.loaded {
-            if idx < l.fns.len() {
-                self.selected = Some(idx);
-                self.rename_buf = l.fns[idx].name.clone().unwrap_or_default();
-                self.scroll_to = Some(l.fns[idx].entry);
+    /// Select a function; optionally record the current one in history.
+    fn jump_to(&mut self, idx: usize, push_hist: bool) {
+        let Some(l) = &self.loaded else { return };
+        if idx >= l.fns.len() {
+            return;
+        }
+        if push_hist {
+            if let Some(cur) = self.selected {
+                if cur != idx {
+                    self.hist.push(cur);
+                    self.hist_fwd.clear();
+                }
             }
+        }
+        self.selected = Some(idx);
+        self.rename_buf = l.fns[idx].name.clone().unwrap_or_default();
+        self.scroll_to = Some(l.fns[idx].entry);
+    }
+
+    fn go_back(&mut self) {
+        if let Some(prev) = self.hist.pop() {
+            if let Some(cur) = self.selected {
+                self.hist_fwd.push(cur);
+            }
+            self.jump_to(prev, false);
+        }
+    }
+
+    fn go_forward(&mut self) {
+        if let Some(next) = self.hist_fwd.pop() {
+            if let Some(cur) = self.selected {
+                self.hist.push(cur);
+            }
+            self.jump_to(next, false);
         }
     }
 }
@@ -176,7 +213,7 @@ impl eframe::App for App {
             }
         }
 
-        // Arrow-key navigation in the function list.
+        // Arrow-key navigation in the function list (no history entries).
         let (down, up) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::ArrowDown),
@@ -193,8 +230,32 @@ impl eframe::App for App {
                 cur
             };
             if next != cur && next < n {
-                self.apply_jump(Some(next));
+                self.jump_to(next, false);
             }
+        }
+
+        // Global hotkeys (ignored while a text field has keyboard focus).
+        let kb_free = !ctx.wants_keyboard_input();
+        let (back, fwd, reload, save) = ctx.input(|i| {
+            (
+                kb_free && i.key_pressed(egui::Key::Backspace),
+                kb_free && i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight),
+                kb_free && i.key_pressed(egui::Key::F5),
+                kb_free && i.modifiers.ctrl && i.key_pressed(egui::Key::S),
+            )
+        });
+        if back {
+            self.go_back();
+        }
+        if fwd {
+            self.go_forward();
+        }
+        if reload && !self.path_edit.is_empty() {
+            let p = self.path_edit.clone();
+            self.load_path(&p);
+        }
+        if save {
+            self.save_map_action();
         }
 
         // Panel order matters: side/bottom panels must be shown BEFORE the
@@ -205,38 +266,239 @@ impl eframe::App for App {
         self.function_list(ctx, &mut jump);
         self.bottom_tabs(ctx, &mut jump);
         self.center_panes(ctx);
-        self.apply_jump(jump);
+        if let Some(j) = jump {
+            self.jump_to(j, true);
+        }
     }
 }
 
 impl App {
+    fn save_map_action(&mut self) {
+        if let Some(l) = &self.loaded {
+            match l.save_map() {
+                Ok(p) => self.status = format!("saved {}", p.display()),
+                Err(e) => self.status = e,
+            }
+        } else {
+            self.status = "nothing loaded".into();
+        }
+    }
+
+    fn export_disasm(&mut self) {
+        let Some(l) = &self.loaded else {
+            self.status = "nothing loaded".into();
+            return;
+        };
+        let out = l.path.with_extension("disasm.txt");
+        let body = l.lines.join("\n");
+        match std::fs::write(&out, body) {
+            Ok(()) => {
+                self.status = format!("exported {} lines -> {}", l.lines.len(), out.display())
+            }
+            Err(e) => self.status = format!("write {}: {e}", out.display()),
+        }
+    }
+
+    fn export_c_selected(&mut self) {
+        let Some(l) = &self.loaded else {
+            self.status = "nothing loaded".into();
+            return;
+        };
+        let Some(sel) = self.selected else { return };
+        match l.decompile(sel) {
+            Ok(text) => {
+                let mut name = l
+                    .fns
+                    .get(sel)
+                    .and_then(|f| f.name.clone())
+                    .unwrap_or_else(|| format!("fn{sel}"));
+                name = name
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '_' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
+                let out = l.path.with_extension(format!("fn{sel}_{name}.c"));
+                match std::fs::write(&out, &text) {
+                    Ok(()) => self.status = format!("exported -> {}", out.display()),
+                    Err(e) => self.status = format!("write {}: {e}", out.display()),
+                }
+            }
+            Err(e) => self.status = format!("decompile: {e}"),
+        }
+    }
+
+    fn export_c_all(&mut self) {
+        let Some(l) = &self.loaded else {
+            self.status = "nothing loaded".into();
+            return;
+        };
+        let out = l.path.with_extension("all.c");
+        let mut body = String::new();
+        for f in &l.fns {
+            body.push_str(&format!(
+                "// ==== fn[{}] {} @ insn {} ====\n",
+                f.idx,
+                f.display_name(),
+                f.entry
+            ));
+            match l.decompile(f.idx) {
+                Ok(text) => body.push_str(&text),
+                Err(e) => body.push_str(&format!("// decompile error: {e}\n")),
+            }
+            body.push('\n');
+        }
+        match std::fs::write(&out, body) {
+            Ok(()) => {
+                self.status = format!("exported {} functions -> {}", l.fns.len(), out.display())
+            }
+            Err(e) => self.status = format!("write {}: {e}", out.display()),
+        }
+    }
+
     fn top_bar(&mut self, ctx: &egui::Context) {
+        let jump: Option<usize> = None;
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                // ---- File ------------------------------------------------
+                ui.menu_button("File", |ui| {
+                    if ui.button("Open (path field)").clicked() {
+                        ui.close_menu();
+                        let p = self.path_edit.clone();
+                        self.load_path(&p);
+                    }
+                    if ui.button("Reload (F5)").clicked() {
+                        ui.close_menu();
+                        let p = self.path_edit.clone();
+                        self.load_path(&p);
+                    }
+                    if ui.button("Save .map (Ctrl+S)").clicked() {
+                        ui.close_menu();
+                        self.save_map_action();
+                    }
+                    ui.separator();
+                    if ui.button("Quit").clicked() {
+                        ui.close_menu();
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+
+                // ---- View ------------------------------------------------
+                ui.menu_button("View", |ui| {
+                    if ui.button("Back (Backspace / Alt+Left)").clicked() {
+                        ui.close_menu();
+                        self.go_back();
+                    }
+                    if ui.button("Forward (Alt+Right)").clicked() {
+                        ui.close_menu();
+                        self.go_forward();
+                    }
+                    ui.separator();
+                    if ui.button("Code view").clicked() {
+                        ui.close_menu();
+                        self.center = CenterTab::Code;
+                    }
+                    if ui.button("Graph: image (call graph)").clicked() {
+                        ui.close_menu();
+                        self.center = CenterTab::Graph;
+                        self.graph_mode = GraphMode::Image;
+                    }
+                    if ui.button("Graph: CFG of selected").clicked() {
+                        ui.close_menu();
+                        self.center = CenterTab::Graph;
+                        self.graph_mode = GraphMode::Cfg;
+                    }
+                    ui.separator();
+                    if ui.button("Graph: center on vmMain (Home)").clicked() {
+                        ui.close_menu();
+                        self.center = CenterTab::Graph;
+                        self.graph_mode = GraphMode::Image;
+                        if let Some(l) = &self.loaded {
+                            self.graph_focus = Some(l.entry_fn());
+                        }
+                    }
+                    if ui.button("Graph: fit image").clicked() {
+                        ui.close_menu();
+                        self.graph_fit = true;
+                    }
+                    if ui.button("Graph: zoom in (+)").clicked() {
+                        ui.close_menu();
+                        self.graph_zoom = (self.graph_zoom * 1.3).clamp(0.03, 2.5);
+                    }
+                    if ui.button("Graph: zoom out (-)").clicked() {
+                        ui.close_menu();
+                        self.graph_zoom = (self.graph_zoom / 1.3).clamp(0.03, 2.5);
+                    }
+                });
+
+                // ---- Tools -----------------------------------------------
+                ui.menu_button("Tools", |ui| {
+                    if ui.button("Export disassembly (.txt)").clicked() {
+                        ui.close_menu();
+                        self.export_disasm();
+                    }
+                    if ui.button("Export identity C (selected fn)").clicked() {
+                        ui.close_menu();
+                        self.export_c_selected();
+                    }
+                    if ui.button("Export identity C (all fns)").clicked() {
+                        ui.close_menu();
+                        self.export_c_all();
+                    }
+                });
+
+                // ---- path field + status --------------------------------
                 let edit = egui::TextEdit::singleline(&mut self.path_edit)
-                    .desired_width(ui.available_width() - 190.0)
+                    .desired_width(ui.available_width() - 16.0)
                     .font(egui::TextStyle::Monospace);
                 let path_resp = ui.add(edit);
-                if ui.button("Open").clicked()
-                    || (path_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                {
+                if path_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     let p = self.path_edit.clone();
                     self.load_path(&p);
                 }
+            });
+            ui.horizontal(|ui| {
+                let kb_free = !ctx.wants_keyboard_input();
+                let home = kb_free && ctx.input(|i| i.key_pressed(egui::Key::Home));
                 if ui
-                    .add_enabled(self.loaded.is_some(), egui::Button::new("Save .map"))
+                    .add_enabled(self.loaded.is_some(), egui::Button::new("vmMain (Home)"))
                     .clicked()
+                    || home
                 {
+                    self.center = CenterTab::Graph;
+                    self.graph_mode = GraphMode::Image;
                     if let Some(l) = &self.loaded {
-                        match l.save_map() {
-                            Ok(p) => self.status = format!("saved {}", p.display()),
-                            Err(e) => self.status = e,
-                        }
+                        self.graph_focus = Some(l.entry_fn());
                     }
                 }
+                if ui
+                    .add_enabled(
+                        !self.hist.is_empty(),
+                        egui::Button::new("< Back (Backspace)"),
+                    )
+                    .clicked()
+                {
+                    self.go_back();
+                }
+                if ui
+                    .add_enabled(
+                        !self.hist_fwd.is_empty(),
+                        egui::Button::new("Forward (Alt+Right) >"),
+                    )
+                    .clicked()
+                {
+                    self.go_forward();
+                }
+                ui.colored_label(egui::Color32::LIGHT_BLUE, &self.status);
             });
-            ui.colored_label(egui::Color32::LIGHT_BLUE, &self.status);
         });
+        if let Some(j) = jump {
+            self.jump_to(j, true);
+        }
     }
 
     fn function_list(&mut self, ctx: &egui::Context, jump: &mut Option<usize>) {
@@ -580,6 +842,7 @@ impl App {
                             &mut self.graph_zoom,
                             &mut self.graph_pan,
                             &mut self.graph_fit,
+                            &mut self.graph_focus,
                             &mut pending_scroll,
                             &mut jump_loc,
                             &mut open_code,
@@ -605,7 +868,7 @@ impl App {
                 self.center = CenterTab::Code;
             }
             if let Some(j) = jump_loc {
-                self.apply_jump(Some(j));
+                self.jump_to(j, true);
             }
         });
     }
@@ -964,12 +1227,13 @@ fn image_graph_pane(
     zoom: &mut f32,
     pan: &mut egui::Vec2,
     fit: &mut bool,
+    focus: &mut Option<usize>,
     scroll: &mut Option<usize>,
     jump: &mut Option<usize>,
     open_code: &mut bool,
 ) {
-    const W: f32 = 150.0;
-    const H: f32 = 26.0;
+    const W: f32 = 168.0;
+    const H: f32 = 36.0;
     const GX: f32 = 44.0;
     const GY: f32 = 12.0;
     const M: f32 = 12.0;
@@ -995,6 +1259,15 @@ fn image_graph_pane(
         let fit_h = rect.height() / total_h;
         *zoom = fit_w.min(fit_h).clamp(0.03, 1.0);
         *pan = egui::Vec2::new(8.0, 8.0);
+    }
+    // Center on the requested function (vmMain on start, Home button later).
+    if let Some(fi) = *focus {
+        *focus = None;
+        if fi < n {
+            *zoom = (*zoom).clamp(0.55, 1.2);
+            let c = pos(fi) + egui::vec2(W / 2.0, H / 2.0);
+            *pan = rect.size() / 2.0 - c * *zoom;
+        }
     }
 
     // Zoom around the pointer.
@@ -1086,8 +1359,8 @@ fn image_graph_pane(
         p.rect_stroke(srect, 2.0, egui::Stroke::new(1.0, border));
         if *zoom >= 0.30 {
             let label = l.fns[i].display_name();
-            let label = if label.chars().count() > 20 {
-                format!("{}…", label.chars().take(19).collect::<String>())
+            let label = if label.chars().count() > 22 {
+                format!("{}…", label.chars().take(21).collect::<String>())
             } else {
                 label.to_string()
             };
@@ -1098,6 +1371,21 @@ fn image_graph_pane(
                 label,
                 egui::FontId::monospace(10.0),
                 color,
+            );
+        }
+        if *zoom >= 0.55 {
+            let info = format!(
+                "{} insns | calls {} | callers {}",
+                l.fns[i].len(),
+                l.callees.get(&i).map_or(0, Vec::len),
+                l.callers.get(&i).map_or(0, Vec::len)
+            );
+            p.text(
+                srect.left_bottom() + egui::vec2(4.0, -4.0),
+                egui::Align2::LEFT_BOTTOM,
+                info,
+                egui::FontId::monospace(9.0),
+                C_DIM,
             );
         }
     }
@@ -1132,22 +1420,6 @@ fn image_graph_pane(
 // CFG graph pane
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::needless_pass_by_ref_mut)]
-fn short_insn(line: &str) -> String {
-    // Strip `#idx @0xaddr ` prefix and trailing comment.
-    let mut it = line.splitn(3, ' ');
-    let _idx = it.next();
-    let _addr = it.next();
-    let rest = it.next().unwrap_or("");
-    let rest = rest.split("  ;").next().unwrap_or(rest);
-    let s = rest.trim();
-    if s.chars().count() > 24 {
-        format!("{}…", s.chars().take(23).collect::<String>())
-    } else {
-        s.to_string()
-    }
-}
-
 fn graph_pane(
     ui: &mut egui::Ui,
     l: &Loaded,
@@ -1161,6 +1433,33 @@ fn graph_pane(
         ui.label("(empty CFG)");
         return;
     }
+
+    const LINE_H: f32 = 12.0;
+    const W: f32 = 470.0;
+    const GX: f32 = 70.0;
+    const GY: f32 = 26.0;
+    const M: f32 = 14.0;
+
+    // Per-block rendered lines: `B{bi} [start,end)` header + insn rows
+    // with hex bytes, IDA style.
+    let block_lines: Vec<Vec<String>> = cfg
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(bi, b)| {
+            let mut v = vec![format!("B{bi} [{}..{})", b.start, b.end)];
+            for ii in b.start..b.end {
+                let hex = crate::state::insn_bytes(&l.d.insns[ii]);
+                let text = l.lines.get(ii).map_or(String::new(), |s| s.to_string());
+                v.push(format!("{hex:<15} {text}"));
+            }
+            v
+        })
+        .collect();
+    let heights: Vec<f32> = block_lines
+        .iter()
+        .map(|v| 6.0 + v.len() as f32 * LINE_H + 4.0)
+        .collect();
 
     // BFS depth from the entry block (acyclic layering).
     let mut depth = vec![0usize; n];
@@ -1179,37 +1478,48 @@ fn graph_pane(
     }
     // Unreachable blocks (defensive): park them one past the deepest layer.
     let max_depth = depth.iter().copied().max().unwrap_or(0);
-    let mut next_free = max_depth + 1;
-    for bi in 0..n {
-        if !seen[bi] {
-            depth[bi] = next_free;
-            next_free += 1;
+    let park = max_depth + 1;
+    for (bi, s) in seen.iter().enumerate() {
+        if !s {
+            depth[bi] = park;
         }
     }
 
-    // Row index within each layer.
+    // Positions: stacked rows per column, variable heights.
     let mut pos = vec![egui::Pos2::ZERO; n];
-    const W: f32 = 176.0;
-    const H: f32 = 58.0;
-    const GX: f32 = 64.0;
-    const GY: f32 = 22.0;
-    const M: f32 = 14.0;
-    let mut col_heights: HashMap<usize, usize> = HashMap::new();
+    let mut col_y: Vec<f32> = vec![M; depth.iter().copied().max().unwrap_or(0) + 1];
     for bi in 0..n {
         let d = depth[bi];
-        let row = col_heights.entry(d).or_insert(0);
-        pos[bi] = egui::Pos2::new(M + d as f32 * (W + GX), M + *row as f32 * (H + GY));
-        *row += 1;
+        pos[bi] = egui::Pos2::new(M + d as f32 * (W + GX), col_y[d]);
+        col_y[d] += heights[bi] + GY;
     }
     let total_w = M + (depth.iter().copied().max().unwrap_or(0) + 1) as f32 * (W + GX);
-    let max_col = col_heights.values().copied().max().unwrap_or(1);
-    let total_h = M + max_col as f32 * (H + GY);
+    let total_h = col_y.iter().copied().fold(M, f32::max);
 
     ui.monospace(format!(
         "CFG fn[{sel}] {} ({} blocks) — click a block to scroll Disassembly",
         l.fns.get(sel).map_or("?", |f| f.display_name()),
         n
     ));
+
+    // Edge label: branch op name for taken edges, "ft" for fallthrough.
+    let edge_label = |bi: usize, s: usize| -> String {
+        let b = &cfg.blocks[bi];
+        if s == b.end {
+            return "ft".into();
+        }
+        for ii in b.start..b.end {
+            let ins = &l.d.insns[ii];
+            if ins.op.is_branch() {
+                if let Some(t) = ins.target {
+                    if t == s {
+                        return ins.op.name().to_string();
+                    }
+                }
+            }
+        }
+        "jmp".into()
+    };
 
     egui::ScrollArea::both()
         .id_salt("cfggraph")
@@ -1224,11 +1534,13 @@ fn graph_pane(
                     if s >= n {
                         continue;
                     }
-                    let from = egui::Pos2::new(pos[bi].x + W, pos[bi].y + H / 2.0);
-                    let to = egui::Pos2::new(pos[s].x, pos[s].y + H / 2.0);
+                    let from = egui::Pos2::new(pos[bi].x + W, pos[bi].y + heights[bi] / 2.0);
+                    let to = egui::Pos2::new(pos[s].x, pos[s].y + heights[s] / 2.0);
                     let back = depth[s] <= depth[bi];
                     let color = if back {
                         Color32::from_rgb(180, 120, 60)
+                    } else if edge_label(bi, s) == "ft" {
+                        Color32::from_rgb(90, 150, 110)
                     } else {
                         Color32::from_rgb(110, 118, 128)
                     };
@@ -1254,38 +1566,37 @@ fn graph_pane(
                         egui::Pos2::new(to.x - 3.0 * dir, to.y + 3.5),
                     ];
                     p.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+                    // Condition label at the curve midpoint.
+                    let mid = egui::Pos2::new(
+                        (from.x + 3.0 * mid_x + 3.0 * mid_x + to.x) / 8.0,
+                        (from.y + 3.0 * from.y + 3.0 * to.y + to.y) / 8.0,
+                    );
+                    let lbl = edge_label(bi, s);
+                    let galley = p.layout_no_wrap(lbl.clone(), egui::FontId::monospace(9.5), color);
+                    let gsize = galley.size();
+                    let bg = egui::Rect::from_center_size(mid, gsize + egui::vec2(6.0, 2.0));
+                    p.rect_filled(bg, 2.0, Color32::from_rgb(24, 26, 30));
+                    p.galley(mid - gsize / 2.0, galley, color);
                 }
             }
 
-            // Nodes.
+            // Nodes: full disasm with hex bytes, IDA style.
             for (bi, b) in cfg.blocks.iter().enumerate() {
-                let r = egui::Rect::from_min_size(pos[bi], egui::vec2(W, H));
+                let r = egui::Rect::from_min_size(pos[bi], egui::vec2(W, heights[bi]));
                 p.rect_filled(r, 3.0, Color32::from_rgb(38, 42, 50));
                 p.rect_stroke(r, 3.0, egui::Stroke::new(1.0, C_LBL));
-                let first = b.start.min(l.lines.len().saturating_sub(1));
-                let last = b.end.saturating_sub(1).min(l.lines.len().saturating_sub(1));
-                let txt = format!("B{bi} [{}, {})", b.start, b.end);
-                p.text(
-                    r.left_top() + egui::vec2(6.0, 4.0),
-                    egui::Align2::LEFT_TOP,
-                    txt,
-                    egui::FontId::monospace(11.0),
-                    C_LBL,
-                );
-                p.text(
-                    r.left_top() + egui::vec2(6.0, 19.0),
-                    egui::Align2::LEFT_TOP,
-                    short_insn(&l.lines[first]),
-                    egui::FontId::monospace(10.5),
-                    C_PLAIN,
-                );
-                p.text(
-                    r.left_top() + egui::vec2(6.0, 33.0),
-                    egui::Align2::LEFT_TOP,
-                    short_insn(&l.lines[last]),
-                    egui::FontId::monospace(10.5),
-                    C_DIM,
-                );
+                let mut y = r.top() + 3.0;
+                for (li, line) in block_lines[bi].iter().enumerate() {
+                    let color = if li == 0 { C_LBL } else { C_PLAIN };
+                    p.text(
+                        egui::Pos2::new(r.left() + 6.0, y),
+                        egui::Align2::LEFT_TOP,
+                        line,
+                        egui::FontId::monospace(10.0),
+                        color,
+                    );
+                    y += LINE_H;
+                }
 
                 let resp = ui.interact(r, egui::Id::new(("gnode", sel, bi)), Sense::click());
                 if resp.hovered() {

@@ -4,7 +4,21 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use qvm::{disassemble, load, load_map, trap_name, Disassembly, Opcode, Qvm};
+use qvm::{disassemble, load, load_map, trap_name, Disassembly, Insn, Opcode, Qvm};
+
+/// Raw bytecode bytes of one instruction, hex formatted (`0C FF FF FF FF`).
+pub fn insn_bytes(ins: &Insn) -> String {
+    let mut b = vec![ins.op as u8];
+    if ins.op.has_int32_operand() {
+        b.extend_from_slice(&ins.operand.unwrap_or(0).to_le_bytes());
+    } else if ins.op.has_byte_operand() {
+        b.push(ins.operand.unwrap_or(0) as u8);
+    }
+    b.iter()
+        .map(|x| format!("{x:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Per-function metadata collected at load time (mirrors `probe_inventory`).
 pub struct FnInfo {
@@ -314,6 +328,22 @@ impl Loaded {
         let f = self.fns.get(idx).ok_or("bad fn index")?;
         let data = self.qvm.data_int32();
         qvm::build_cfg(&self.d, (f.entry, f.end), &data).ok_or_else(|| "degenerate CFG".into())
+    }
+
+    /// Index of the image entry function (`vmMain`), best effort.
+    pub fn entry_fn(&self) -> usize {
+        for f in &self.fns {
+            if let Some(n) = &f.name {
+                if n.eq_ignore_ascii_case("vmMain") || n.eq_ignore_ascii_case("vm_main") {
+                    return f.idx;
+                }
+            }
+        }
+        self.callgraph
+            .roots
+            .first()
+            .copied()
+            .unwrap_or(self.fns.len().saturating_sub(1))
     }
 
     /// Decompiled identity C for one function (uncached; the GUI caches).
