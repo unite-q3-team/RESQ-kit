@@ -49,7 +49,15 @@ pub fn escape(s: &str) -> String {
 }
 
 /// Short human-readable description of an opcode (for hover tooltips).
-pub fn opcode_help(op: Opcode) -> &'static str {
+pub fn opcode_help(op: Opcode, lang: crate::i18n::Lang) -> &'static str {
+    use crate::i18n::Lang;
+    match lang {
+        Lang::En => opcode_help_en(op),
+        Lang::Ru => opcode_help_ru(op).unwrap_or_else(|| opcode_help_en(op)),
+    }
+}
+
+fn opcode_help_en(op: Opcode) -> &'static str {
     use Opcode::*;
     match op {
         Undef => "undefined opcode",
@@ -113,6 +121,72 @@ pub fn opcode_help(op: Opcode) -> &'static str {
         Cvif => "convert int to float",
         Cvfi => "convert float to int (truncating)",
     }
+}
+
+fn opcode_help_ru(op: Opcode) -> Option<&'static str> {
+    use Opcode::*;
+    Some(match op {
+        Undef => "неопределённый опкод",
+        Ignore => "нет операции, игнорируется интерпретатором",
+        Break => "точка останова VM (ловушка отладчика)",
+        Enter => "пролог функции: выделить кадр стека (операнд = размер кадра)",
+        Leave => "эпилог функции: освободить кадр и вернуться к вызывающему",
+        Call => "вызов функции: адрес снимается со стека (отрицательный = syscall)",
+        Push => "положить вершину opstack на стек вызовов",
+        Pop => "снять значение со стека вызовов и выбросить",
+        Const => "положить 32-битную константу (операнд); часто адрес или номер syscall",
+        Local => "положить адрес локала: programStack + кадр + операнд",
+        Jump => "косвенный переход: адрес цели снимается со стека",
+        Eq => "снять a, b; если a == b — переход на цель",
+        Ne => "снять a, b; если a != b — переход на цель",
+        Lti => "снять a, b; если a < b (знаково) — переход",
+        Lei => "снять a, b; если a <= b (знаково) — переход",
+        Gti => "снять a, b; если a > b (знаково) — переход",
+        Gei => "снять a, b; если a >= b (знаково) — переход",
+        Ltu => "снять a, b; если a < b (беззнаково) — переход",
+        Leu => "снять a, b; если a <= b (беззнаково) — переход",
+        Gtu => "снять a, b; если a > b (беззнаково) — переход",
+        Geu => "снять a, b; если a >= b (беззнаково) — переход",
+        Eqf => "снять float a, b; если a == b — переход",
+        Nef => "снять float a, b; если a != b — переход",
+        Ltf => "снять float a, b; если a < b — переход",
+        Lef => "снять float a, b; если a <= b — переход",
+        Gtf => "снять float a, b; если a > b — переход",
+        Gef => "снять float a, b; если a >= b — переход",
+        Load1 => "читать 1 байт памяти по адресу на вершине стека",
+        Load2 => "читать 2 байта (u16) из памяти",
+        Load4 => "читать 4 байта (i32) из памяти",
+        Store1 => "снять значение, адрес; записать младший байт в память",
+        Store2 => "снять значение, адрес; записать 2 байта в память",
+        Store4 => "снять значение, адрес; записать 4 байта в память",
+        Arg => "упаковать аргумент: копия из opstack в область стека вызовов (операнд = смещение)",
+        BlockCopy => "снять count, src, dest; скопировать блок памяти",
+        Sex8 => "расширить знаком младший байт до 32 бит",
+        Sex16 => "расширить знаком младшие 16 бит до 32 бит",
+        Negi => "инвертировать целое на вершине стека",
+        Add => "снять a, b; положить a + b",
+        Sub => "снять a, b; положить a - b",
+        Divi => "снять a, b; положить a / b (знаково)",
+        Divu => "снять a, b; положить a / b (беззнаково)",
+        Modi => "снять a, b; положить a % b (знаково)",
+        Modu => "снять a, b; положить a % b (беззнаково)",
+        Muli => "снять a, b; положить a * b",
+        Mulu => "снять a, b; положить a * b (младшие 32 бита)",
+        Band => "снять a, b; положить a & b",
+        Bor => "снять a, b; положить a | b",
+        Bxor => "снять a, b; положить a ^ b",
+        Bcom => "побитовое НЕ (~a) над вершиной стека",
+        Lsh => "снять a, b; положить a << b",
+        Rshi => "снять a, b; положить a >> b (арифметический)",
+        Rshu => "снять a, b; положить a >> b (логический)",
+        Negf => "инвертировать float на вершине стека",
+        AddF => "снять float a, b; положить a + b",
+        SubF => "снять float a, b; положить a - b",
+        DivF => "снять float a, b; положить a / b",
+        MulF => "снять float a, b; положить a * b",
+        Cvif => "преобразовать int в float",
+        Cvfi => "преобразовать float в int (с усечением)",
+    })
 }
 
 /// Per-function metadata collected at load time (mirrors `probe_inventory`).
@@ -538,16 +612,22 @@ impl Loaded {
     /// value, pointer to a string, runtime global) and how many functions
     /// reference it. `None` for anything outside VM memory (call targets,
     /// syscalls, the NULL-sentinel word at 0..4).
-    pub fn mem_hint(&self, addr: i32) -> Option<String> {
+    pub fn mem_hint(&self, addr: i32, lang: crate::i18n::Lang) -> Option<String> {
+        use crate::i18n::Lang;
         if addr < 4 {
             return None;
         }
         let q = &self.qvm;
         let lit_end = q.data_length + q.lit_length;
+        // Segment names per GLOSSARY: данные / литералы / BSS.
+        let (seg_data, seg_lit) = match lang {
+            Lang::En => ("data", "lit"),
+            Lang::Ru => ("данные", "литералы"),
+        };
         let seg = if addr < q.data_length {
-            "data"
+            seg_data
         } else if addr < lit_end {
-            "lit"
+            seg_lit
         } else if addr < lit_end + q.bss_length {
             "BSS"
         } else {
@@ -566,12 +646,21 @@ impl Loaded {
         if let Some(s) = q.string_at(addr) {
             hint.push_str(&format!(" = {}", quote(&s)));
         } else if seg == "BSS" {
-            hint.push_str(" = runtime global (zero at load)");
+            hint.push_str(match lang {
+                Lang::En => " = runtime global (zero at load)",
+                Lang::Ru => " = глобал времени исполнения (обнулён при загрузке)",
+            });
         } else {
             let v = self.mem_i32(addr);
             if v > 4 {
                 if let Some(s) = q.string_at(v) {
-                    hint.push_str(&format!(" = ptr -> {}", quote(&s)));
+                    hint.push_str(&format!(
+                        " = {}",
+                        match lang {
+                            Lang::En => format!("ptr -> {}", quote(&s)),
+                            Lang::Ru => format!("указатель -> {}", quote(&s)),
+                        }
+                    ));
                     return Some(hint);
                 }
             }
@@ -585,7 +674,10 @@ impl Loaded {
         }
         if let Some(r) = self.const_refs.get(&addr) {
             if !r.is_empty() {
-                hint.push_str(&format!("\nreferenced by {} fn(s)", r.len()));
+                hint.push_str(&match lang {
+                    Lang::En => format!("\nreferenced by {} fn(s)", r.len()),
+                    Lang::Ru => format!("\nупоминается в {} фн.", r.len()),
+                });
             }
         }
         Some(hint)
@@ -672,6 +764,7 @@ impl Loaded {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Lang;
 
     #[test]
     fn rebuild_search_covers_name_traps_strings() {
@@ -735,16 +828,93 @@ mod tests {
 
         let l = Loaded::open(&path).expect("open");
         // NULL sentinel and outside-of-memory addresses get no hint.
-        assert_eq!(l.mem_hint(0), None);
-        assert_eq!(l.mem_hint(-1), None);
+        assert_eq!(l.mem_hint(0, Lang::En), None);
+        assert_eq!(l.mem_hint(-1, Lang::En), None);
         // Call target (inside code, beyond data+lit+bss) gets no hint.
-        assert_eq!(l.mem_hint(10_000), None);
-        // BSS address: classified + zero-at-load note.
-        let h = l.mem_hint(0x24).expect("bss hint");
+        assert_eq!(l.mem_hint(10_000, Lang::En), None);
+        // BSS address: classified + zero-at-load note (EN).
+        let h = l.mem_hint(0x24, Lang::En).expect("bss hint");
         assert!(h.starts_with("[0x24] BSS"), "{h}");
         assert!(h.contains("zero at load"), "{h}");
+        // Same address in Russian: segment names and phrases translated.
+        let hr = l.mem_hint(0x24, Lang::Ru).expect("bss hint ru");
+        assert!(hr.starts_with("[0x24] BSS"), "{hr}");
+        assert!(hr.contains("обнулён при загрузке"), "{hr}");
         // No CONST refs in the trivial fixture.
         assert!(l.const_refs.is_empty());
+
+        // Opcode help: EN identity + RU translation with EN fallback shape.
+        assert_eq!(
+            opcode_help(Opcode::Enter, Lang::En),
+            opcode_help_en(Opcode::Enter)
+        );
+        assert!(opcode_help(Opcode::Enter, Lang::Ru).contains("пролог функции"));
+        assert!(opcode_help(Opcode::Const, Lang::Ru).contains("константу"));
+        // Every opcode has a complete RU translation (no fallback needed).
+        for op in [
+            Opcode::Undef,
+            Opcode::Ignore,
+            Opcode::Break,
+            Opcode::Enter,
+            Opcode::Leave,
+            Opcode::Call,
+            Opcode::Push,
+            Opcode::Pop,
+            Opcode::Const,
+            Opcode::Local,
+            Opcode::Jump,
+            Opcode::Eq,
+            Opcode::Ne,
+            Opcode::Lti,
+            Opcode::Lei,
+            Opcode::Gti,
+            Opcode::Gei,
+            Opcode::Ltu,
+            Opcode::Leu,
+            Opcode::Gtu,
+            Opcode::Geu,
+            Opcode::Eqf,
+            Opcode::Nef,
+            Opcode::Ltf,
+            Opcode::Lef,
+            Opcode::Gtf,
+            Opcode::Gef,
+            Opcode::Load1,
+            Opcode::Load2,
+            Opcode::Load4,
+            Opcode::Store1,
+            Opcode::Store2,
+            Opcode::Store4,
+            Opcode::Arg,
+            Opcode::BlockCopy,
+            Opcode::Sex8,
+            Opcode::Sex16,
+            Opcode::Negi,
+            Opcode::Add,
+            Opcode::Sub,
+            Opcode::Divi,
+            Opcode::Divu,
+            Opcode::Modi,
+            Opcode::Modu,
+            Opcode::Muli,
+            Opcode::Mulu,
+            Opcode::Band,
+            Opcode::Bor,
+            Opcode::Bxor,
+            Opcode::Bcom,
+            Opcode::Lsh,
+            Opcode::Rshi,
+            Opcode::Rshu,
+            Opcode::Negf,
+            Opcode::AddF,
+            Opcode::SubF,
+            Opcode::DivF,
+            Opcode::MulF,
+            Opcode::Cvif,
+            Opcode::Cvfi,
+        ] {
+            assert_ne!(opcode_help_ru(op), None, "missing RU help for {op:?}");
+        }
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();

@@ -1729,7 +1729,7 @@ impl App {
                             // of the tokens; Sense::hover only, so clicks on
                             // function/label/string tokens still pass through.
                             let mut help =
-                                format!("[{}] {}", ins.op.name(), opcode_help(ins.op));
+                                format!("[{}] {}", ins.op.name(), opcode_help(ins.op, self.lang));
                             if let Some(t) = ins.target {
                                 help.push_str(&format!("\ntarget: insn {t}"));
                             }
@@ -1740,7 +1740,7 @@ impl App {
                             // What a CONST points at in VM memory.
                             if ins.op == Opcode::Const {
                                 if let Some(v) = ins.operand {
-                                    if let Some(h) = l.mem_hint(v) {
+                                    if let Some(h) = l.mem_hint(v, self.lang) {
                                         help.push('\n');
                                         help.push_str(&h);
                                     }
@@ -2257,7 +2257,7 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                 }
                 Seg::NumTok(t) => {
                     let val = parse_num(t);
-                    let hint = val.and_then(|v| l.mem_hint(v));
+                    let hint = val.and_then(|v| l.mem_hint(v, sink.lang));
                     let r = tok_label(ui, t, C_NUM);
                     // Hover hint for memory addresses. Enabled only in the
                     // Identity C pane (token_hints): in Disassembly the row
