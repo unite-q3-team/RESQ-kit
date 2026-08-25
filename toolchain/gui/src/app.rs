@@ -12,7 +12,7 @@ use egui::{Color32, RichText, Sense, TextWrapMode};
 use qvm::Opcode;
 
 use crate::i18n::{self, LangId};
-use crate::state::{escape, insn_bytes, opcode_help, Decompiled, Loaded};
+use crate::state::{escape, insn_bytes, opcode_help, parse_num, Decompiled, Loaded, LocalDecl};
 
 /// Keep at most this many decompiled functions cached (FIFO eviction).
 const C_CACHE_CAP: usize = 128;
@@ -274,6 +274,8 @@ enum Seg {
     StrTok(String, i32),
     /// Numeric CONST operand: potential data address (context menu).
     NumTok(String),
+    /// Frame-slot local `loc_N` -> slot offset (hover provenance hints).
+    LocTok(String, i32),
 }
 
 /// Shared immutable view over `Loaded` maps used by the tokenizers.
@@ -300,6 +302,10 @@ struct Sink<'a> {
     token_hints: bool,
     /// UI language for token context-menu labels.
     lang: LangId,
+    /// Current Identity C line (field-access context for number tokens).
+    c_line: &'a str,
+    /// Tracked `loc_N` initializations of the function being shown.
+    locals: &'a HashMap<String, LocalDecl>,
 }
 
 pub struct App {
@@ -1630,6 +1636,7 @@ impl App {
                             text: format!("// decompile error: {e}\n").into(),
                             ranges: Vec::new().into(),
                             labels: HashMap::new().into(),
+                            locals: HashMap::new().into(),
                         },
                     };
                     let d = Arc::new(d);
@@ -1728,6 +1735,8 @@ impl App {
                                 c_goto: &mut c_goto_loc,
                                 token_hints: false,
                                 lang: self.lang,
+                                c_line: "",
+                                locals: &dec.locals,
                             };
                             render_row(ui, l, &segs, &mut sink);
                             // Instruction help tooltip. Created last => on top
@@ -1788,6 +1797,8 @@ impl App {
                                 c_goto: &mut c_goto_loc,
                                 token_hints: true,
                                 lang: self.lang,
+                                c_line: c_rows[i],
+                                locals: &dec.locals,
                             };
                             render_row(ui, l, &segs, &mut sink);
                             // Hover/click a C line -> highlight its instructions.
@@ -2047,6 +2058,8 @@ fn classify_ident(w: &str, tok: &Tok, out: &mut Vec<Seg>) {
             Some(&idx) => out.push(Seg::FnTok(w.to_string(), idx)),
             None => out.push(Seg::P(w.to_string(), C_FN)),
         }
+    } else if let Some(n) = w.strip_prefix("loc_").and_then(|d| d.parse::<i32>().ok()) {
+        out.push(Seg::LocTok(w.to_string(), n));
     } else {
         out.push(Seg::P(w.to_string(), C_PLAIN));
     }
@@ -2160,13 +2173,53 @@ fn pointer_in(ui: &egui::Ui, resp: &egui::Response) -> bool {
         .is_some_and(|p| resp.rect.contains(p))
 }
 
-/// Parse a numeric token: decimal or 0x-prefixed hex.
-fn parse_num(t: &str) -> Option<i32> {
-    if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        i32::from_str_radix(h, 16).ok()
-    } else {
-        t.parse::<i32>().ok()
+/// If `tok` appears as `(tok)` in a `(loc_X) + (tok)` field-access context,
+/// return the `loc_X` name.
+fn field_base_loc(line: &str, tok: &str) -> Option<String> {
+    let pat = format!("{tok})");
+    let mut rest = line;
+    let mut off = 0usize;
+    while let Some(p) = rest.find(&pat) {
+        let abs = off + p;
+        let before = &line[..abs];
+        // `... (loc_X) + (` immediately before the token.
+        if before.ends_with('(') && before[..before.len() - 1].ends_with(") + ") {
+            let prefix = &before[..before.len() - 5]; // drop ") + ("
+            if let Some(lp) = prefix.rfind("(loc_") {
+                let name = &prefix[lp + 1..];
+                if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return Some(name.to_string());
+                }
+            }
+        }
+        off = abs + pat.len();
+        rest = &line[off..];
     }
+    None
+}
+
+/// Provenance lines for a tracked local: `= idx * stride + base` plus the
+/// memory hint of a dereferenced base global.
+fn local_provenance(l: &Loaded, sink: &Sink, name: &str) -> Option<String> {
+    let d = sink.locals.get(name)?;
+    let mut src = String::from("= ");
+    if let (Some(idx), Some(st)) = (&d.index, d.stride) {
+        src.push_str(&format!("{idx} * {st} + "));
+    }
+    if let Some(v) = d.base_const {
+        src.push_str(&format!("{v:#x}"));
+    }
+    if let Some(v) = d.base_deref {
+        src.push_str(&format!("*({v:#x})"));
+        if let Some(h) = l.mem_hint(v, sink.lang) {
+            src.push('\n');
+            src.push_str(&h);
+        }
+    }
+    if src == "= " {
+        return None;
+    }
+    Some(src)
 }
 
 /// Render one source line as a single horizontal run of tight tokens.
@@ -2260,9 +2313,52 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                         }
                     });
                 }
+                Seg::LocTok(t, off) => {
+                    let r = tok_label(ui, t, C_SLOT);
+                    // Provenance hint: where this frame slot got its value.
+                    if sink.token_hints && pointer_in(ui, &r) {
+                        let mut h = i18n::mem_hint_phrase(sink.lang, "hint.local")
+                            .unwrap_or_else(|| "local variable (frame+%N)".into())
+                            .replace("%N", &off.to_string());
+                        if let Some(src) = local_provenance(l, sink, t) {
+                            h.push('\n');
+                            h.push_str(&src);
+                        }
+                        r.show_tooltip_text(RichText::new(h).monospace());
+                    }
+                }
                 Seg::NumTok(t) => {
                     let val = parse_num(t);
-                    let hint = val.and_then(|v| l.mem_hint(v, sink.lang));
+                    // Absolute-address hints only for plausible addresses
+                    // (hex literals or large values): small decimals in
+                    // identity C are field offsets/indices, not addresses.
+                    let addr_hint = if t.starts_with("0x")
+                        || t.starts_with("0X")
+                        || matches!(val, Some(v) if v >= 0x4000)
+                    {
+                        val.and_then(|v| l.mem_hint(v, sink.lang))
+                    } else {
+                        None
+                    };
+                    // `((loc_X) + (K))` field access -> struct-field hint.
+                    let hint = addr_hint.or_else(|| {
+                        field_base_loc(sink.c_line, t).map(|loc| {
+                            let mut h = i18n::mem_hint_phrase(sink.lang, "hint.field")
+                                .unwrap_or_else(|| {
+                                    "field at offset +%OFF of the struct at %LOC".into()
+                                })
+                                .replace(
+                                    "%OFF",
+                                    &val.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+                                )
+                                .replace("%LOC", &loc);
+                            if let Some(src) = local_provenance(l, sink, &loc) {
+                                h.push('\n');
+                                h.push_str(&src);
+                            }
+                            h
+                        })
+                    });
                     let r = tok_label(ui, t, C_NUM);
                     // Hover hint for memory addresses. Enabled only in the
                     // Identity C pane (token_hints): in Disassembly the row
@@ -2339,6 +2435,7 @@ fn seg_parts(seg: &Seg) -> (&str, Color32) {
         Seg::StrTok(t, _) => (t, C_STR),
         Seg::NumTok(t) => (t, C_NUM),
         Seg::LblTok(t, _) => (t, C_LBL),
+        Seg::LocTok(t, _) => (t, C_SLOT),
     }
 }
 
@@ -2998,6 +3095,19 @@ mod tests {
         assert_eq!(parse_num("0X10"), Some(16));
         assert_eq!(parse_num("0xzz"), None);
         assert_eq!(parse_num("abc"), None);
+    }
+
+    #[test]
+    fn field_base_loc_finds_struct_context() {
+        let line = "  *(<int>*)((loc_20) + (704)) = 0;";
+        assert_eq!(field_base_loc(line, "704").as_deref(), Some("loc_20"));
+        assert_eq!(field_base_loc(line, "loc_20"), None);
+        assert_eq!(field_base_loc(line, "0"), None);
+        // offset appearing twice: the field-context one wins
+        let line2 = "  if (((*(<int>*)((loc_20) + (468))) != (468)) != (0)) goto L94017;";
+        assert_eq!(field_base_loc(line2, "468").as_deref(), Some("loc_20"));
+        // no loc prefix -> no match
+        assert_eq!(field_base_loc("x = (a) + (704);", "704"), None);
     }
 
     #[test]

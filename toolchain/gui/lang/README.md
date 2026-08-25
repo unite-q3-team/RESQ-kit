@@ -47,7 +47,9 @@ table is not needed (an `en.json` may still override individual strings).
 - `mem_hints` — phrases for the memory-address tooltips:
   `seg.data`, `seg.lit` (segment names), `hint.bss` (BSS global note),
   `hint.ptr` (pointer prefix), `hint.refs` (`%N` = referencing-function
-  count).
+  count), `hint.local` (`%N` = frame-slot offset, shown when hovering a
+  `loc_N` token), `hint.field` (`%OFF` = field offset, `%LOC` = base
+  local; shown when hovering the offset in `(loc_X) + (OFF)`).
 
 `ru.json` is embedded into the binary as a working example — copy it as
 a starting point for a new language. Files with parse errors are

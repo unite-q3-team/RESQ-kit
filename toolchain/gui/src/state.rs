@@ -15,6 +15,96 @@ pub struct Decompiled {
     pub ranges: std::sync::Arc<[(usize, usize)]>,
     /// Block label insn -> C line index (goto navigation targets).
     pub labels: std::sync::Arc<HashMap<usize, usize>>,
+    /// Tracked `loc_N = ...` address initializations (for hover hints on
+    /// `loc_N` tokens and `(loc_N) + (offset)` field accesses).
+    pub locals: std::sync::Arc<HashMap<String, LocalDecl>>,
+}
+
+/// Tracked initialization of a `loc_N` local, e.g.
+/// `loc_20 = ((arg_3) * (1568)) + (*(<int>*)(0xf0850));`
+/// (in q3 terms: `cl = level.clients[clientNum]`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LocalDecl {
+    /// Index expression name (`arg_3`) when the base is scaled.
+    pub index: Option<String>,
+    /// Scale of `index`.
+    pub stride: Option<i32>,
+    /// Absolute constant base (`+ (149584)`).
+    pub base_const: Option<i32>,
+    /// Base loaded from a fixed address (`+ (*(<int>*)(0xf0850))`).
+    pub base_deref: Option<i32>,
+}
+
+/// Parse a numeric literal: decimal or 0x-prefixed hex.
+pub fn parse_num(t: &str) -> Option<i32> {
+    if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        i32::from_str_radix(h, 16).ok()
+    } else {
+        t.parse::<i32>().ok()
+    }
+}
+
+/// Parse a `loc_N = ...;` line that builds an address from an optional
+/// `index * stride` term plus a constant or dereferenced-global base.
+/// Recognizes the identity-C shapes emitted by `fmt_function_lines`;
+/// returns `None` for anything else (loads, copies, comparisons).
+pub fn parse_local_decl(line: &str) -> Option<(String, LocalDecl)> {
+    // Normalize: drop all whitespace and the trailing `;`.
+    let t: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    let t = t.strip_suffix(';')?;
+    let (name, rhs) = t.split_once('=')?;
+    if !name.starts_with("loc_") || !name[4..].chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let mut d = LocalDecl {
+        index: None,
+        stride: None,
+        base_const: None,
+        base_deref: None,
+    };
+
+    // `(149584)` | `(*(<int>*)(0xf0850))` -> fills base_* fields.
+    fn operand(s: &str, d: &mut LocalDecl) -> bool {
+        let Some(inner) = s.strip_prefix('(').and_then(|x| x.strip_suffix(')')) else {
+            return false;
+        };
+        if let Some(h) = inner
+            .strip_prefix("*(<int>*)(")
+            .and_then(|x| x.strip_suffix(')'))
+        {
+            d.base_deref = parse_num(h);
+            return d.base_deref.is_some();
+        }
+        d.base_const = parse_num(inner);
+        d.base_const.is_some()
+    }
+
+    if let Some(p) = rhs.find(")+(") {
+        // `((idx) * (S)) + (base)`
+        let l = rhs[..p + 1].to_string();
+        let r = format!("({}", &rhs[p + 3..]);
+        if !(l.starts_with("((") && l.ends_with("))")) {
+            return None;
+        }
+        let inner = &l[1..l.len() - 1]; // `(arg_3)*(816)`
+        let (a, b) = inner.split_once("*(")?;
+        let idx = a.trim_start_matches('(').trim_end_matches(')');
+        if idx.is_empty() || !idx.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return None;
+        }
+        d.index = Some(idx.to_string());
+        d.stride = b.trim_end_matches(')').parse().ok();
+        d.stride?;
+        if !operand(&r, &mut d) {
+            return None;
+        }
+    } else {
+        // `(base)` only.
+        if !operand(rhs, &mut d) {
+            return None;
+        }
+    }
+    Some((name.to_string(), d))
 }
 
 /// Raw bytecode bytes of one instruction, hex formatted (`0C FF FF FF FF`).
@@ -645,11 +735,19 @@ impl Loaded {
                 n.parse::<usize>().ok().map(|n| (n, i))
             })
             .collect();
-        let ranges: Vec<(usize, usize)> = lines.into_iter().map(|(_, r)| r).collect();
+        let ranges: Vec<(usize, usize)> = lines.iter().map(|(_, r)| *r).collect();
+        // Track `loc_N = ...` address initializations for hover hints.
+        let mut locals: HashMap<String, LocalDecl> = HashMap::new();
+        for (t, _) in &lines {
+            if let Some((n, d)) = parse_local_decl(t) {
+                locals.entry(n).or_insert(d);
+            }
+        }
         Ok(Decompiled {
             text: text.into(),
             ranges: ranges.into(),
             labels: labels.into(),
+            locals: locals.into(),
         })
     }
 
@@ -791,5 +889,45 @@ mod tests {
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn parse_local_decl_tracks_base_shapes() {
+        // index * stride + absolute const base
+        let (n, d) = parse_local_decl("  loc_24 = ((arg_3) * (816)) + (149584);").expect("parse");
+        assert_eq!(n, "loc_24");
+        assert_eq!(d.index.as_deref(), Some("arg_3"));
+        assert_eq!(d.stride, Some(816));
+        assert_eq!(d.base_const, Some(149584));
+        assert_eq!(d.base_deref, None);
+
+        // index * stride + dereferenced global (hex, with spaces)
+        let (n, d) = parse_local_decl("  loc_20 = ((arg_3) * (1568)) + (*(< int>*)( 0xf0850));")
+            .expect("parse");
+        assert_eq!(n, "loc_20");
+        assert_eq!(d.index.as_deref(), Some("arg_3"));
+        assert_eq!(d.stride, Some(1568));
+        assert_eq!(d.base_deref, Some(0xf0850));
+        assert_eq!(d.base_const, None);
+
+        // plain const base
+        let (_, d) = parse_local_decl("loc_4 = (45488);").expect("parse");
+        assert_eq!(d.base_const, Some(45488));
+        assert_eq!(d.index, None);
+
+        // loads / copies / non-loc lines are rejected
+        assert_eq!(
+            parse_local_decl("loc_28 = *(<int>*)((loc_20) + (104));"),
+            None
+        );
+        assert_eq!(
+            parse_local_decl("loc_32 = (*(<int>*)(loc_20)) + (264);"),
+            None
+        );
+        assert_eq!(
+            parse_local_decl("if ((*(<int>*)(loc_24)) != (0)) goto L94017;"),
+            None
+        );
+        assert_eq!(parse_local_decl("arg_3 = (5);"), None);
     }
 }
