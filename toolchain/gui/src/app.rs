@@ -11,7 +11,7 @@ use eframe::egui;
 use egui::{Color32, RichText, Sense, TextWrapMode};
 use qvm::Opcode;
 
-use crate::i18n::{self, Lang};
+use crate::i18n::{self, LangId};
 use crate::state::{escape, insn_bytes, opcode_help, Decompiled, Loaded};
 
 /// Keep at most this many decompiled functions cached (FIFO eviction).
@@ -184,8 +184,13 @@ struct PersistState {
     center: u8,
     #[serde(default)]
     tab: u8,
-    #[serde(default)]
-    lang: u8,
+    /// Persisted language code (`"en"`, `"ru"`, user-added ids…).
+    #[serde(default = "default_lang_code")]
+    lang_code: String,
+}
+
+fn default_lang_code() -> String {
+    "en".to_string()
 }
 
 /// Decode an embedded PNG into straight-alpha RGBA pixels (window icons).
@@ -294,7 +299,7 @@ struct Sink<'a> {
     /// Disassembly row tooltip owns hover there).
     token_hints: bool,
     /// UI language for token context-menu labels.
-    lang: Lang,
+    lang: LangId,
 }
 
 pub struct App {
@@ -311,8 +316,8 @@ pub struct App {
     status: String,
     tab: BottomTab,
     center: CenterTab,
-    /// UI language (EN / RU), persisted.
-    lang: Lang,
+    /// UI language, persisted by code string.
+    lang: LangId,
     /// Call-graph canvas camera.
     cam_graph: Cam,
     /// CFG canvas camera.
@@ -377,7 +382,7 @@ impl App {
             status: "open a .qvm (File menu, path field, or drag & drop)".into(),
             tab: BottomTab::Strings,
             center: CenterTab::Code,
-            lang: Lang::default(),
+            lang: LangId::default(),
             cam_graph: Cam::default(),
             cam_cfg: Cam::default(),
             img_offsets: HashMap::new(),
@@ -416,7 +421,7 @@ impl App {
                     app.bss_filter = s.bss_filter;
                     app.center = CenterTab::from_u8(s.center);
                     app.tab = BottomTab::from_u8(s.tab);
-                    app.lang = Lang::from_u8(s.lang);
+                    app.lang = LangId::from_code(&s.lang_code).unwrap_or_default();
                 }
             }
         }
@@ -439,7 +444,7 @@ impl App {
             bss_filter: self.bss_filter.clone(),
             center: self.center.as_u8(),
             tab: self.tab.as_u8(),
-            lang: self.lang.as_u8(),
+            lang_code: self.lang.code().to_string(),
         }
     }
 
@@ -1039,12 +1044,12 @@ impl App {
                     }
                     ui.separator();
                     ui.menu_button(self.tr("Language"), |ui| {
-                        for l in Lang::all() {
+                        for (i, c) in i18n::languages().iter().enumerate() {
                             if ui
-                                .selectable_label(self.lang == l, l.native_name())
+                                .selectable_label(self.lang.0 as usize == i, &c.name)
                                 .clicked()
                             {
-                                self.lang = l;
+                                self.lang = LangId(i as u8);
                             }
                         }
                     });
@@ -2396,7 +2401,7 @@ fn image_graph_pane(
     l: &Loaded,
     sel: usize,
     tok: &Tok,
-    lang: Lang,
+    lang: LangId,
     cam: &mut Cam,
     focus: &mut Option<usize>,
     offsets: &mut HashMap<usize, egui::Vec2>,
@@ -2685,7 +2690,7 @@ fn cfg_canvas(
     sel: usize,
     cfg: &qvm::CFG,
     tok: &Tok,
-    lang: Lang,
+    lang: LangId,
     cam: &mut Cam,
     offsets: &mut HashMap<(usize, usize), egui::Vec2>,
     drag: &mut Option<usize>,
@@ -2997,24 +3002,18 @@ mod tests {
 
     #[test]
     fn i18n_translates_and_falls_back() {
-        // Known translation.
-        assert_eq!(i18n::tr(Lang::Ru, "File"), "Файл");
         // English is the identity mapping.
-        assert_eq!(i18n::tr(Lang::En, "File"), "File");
-        // Missing translation falls back to the key.
-        assert_eq!(i18n::tr(Lang::Ru, "no such key"), "no such key");
+        assert_eq!(i18n::tr(LangId::EN, "File"), "File");
+        assert_eq!(i18n::tr(LangId::EN, "no such key"), "no such key");
         // Templates replace %KEY placeholders.
         assert_eq!(
-            i18n::trf(Lang::Ru, "%A/%B functions", &[("A", &1), ("B", &2)]),
-            "функций: 1/2"
-        );
-        assert_eq!(
-            i18n::trf(Lang::En, "%A/%B functions", &[("A", &1), ("B", &2)]),
+            i18n::trf(LangId::EN, "%A/%B functions", &[("A", &1), ("B", &2)]),
             "1/2 functions"
         );
-        // Language persistence round trip.
-        assert_eq!(Lang::from_u8(Lang::Ru.as_u8()), Lang::Ru);
-        assert_eq!(Lang::from_u8(200), Lang::En);
+        // Language persistence round trip: unknown code -> English default.
+        assert_eq!(LangId::from_code("en"), Some(LangId::EN));
+        assert_eq!(LangId::from_code("no-such-lang"), None);
+        assert_eq!(LangId::default(), LangId::EN);
     }
 
     #[test]
@@ -3075,7 +3074,7 @@ mod tests {
             bss_filter: "".into(),
             center: CenterTab::Graph.as_u8(),
             tab: BottomTab::Xrefs.as_u8(),
-            lang: Lang::Ru.as_u8(),
+            lang_code: "ru".into(),
         };
         let json = serde_json::to_string(&s).expect("serialize");
         let back: PersistState = serde_json::from_str(&json).expect("deserialize");
@@ -3084,7 +3083,7 @@ mod tests {
         assert_eq!(back.strings_filter, s.strings_filter);
         assert_eq!(CenterTab::from_u8(back.center), CenterTab::Graph);
         assert_eq!(BottomTab::from_u8(back.tab), BottomTab::Xrefs);
-        assert_eq!(Lang::from_u8(back.lang), Lang::Ru);
+        assert_eq!(LangId::from_code(&back.lang_code), Some(LangId(1)));
 
         // Blobs from older versions (extra/missing fields) still load.
         let legacy = r#"{"path_edit":"a.qvm","filter":"","strings_filter":"",

@@ -41,7 +41,7 @@ fn main() {
             continue;
         }
         let Some(v) = ins.operand else { continue };
-        if let Some(h) = l.mem_hint(v, resq_gui::i18n::Lang::En) {
+        if let Some(h) = l.mem_hint(v, resq_gui::i18n::LangId::EN) {
             println!("  {h}");
             shown += 1;
         }
