@@ -46,4 +46,17 @@ fn main() {
             shown += 1;
         }
     }
+
+    // Heuristic auto-naming (vmMain + syscall thunks) and struct census.
+    let mut l = l;
+    let (named, thunks) = l.auto_name_functions();
+    println!("auto-named {named} functions ({thunks} syscall thunks), e.g.:");
+    for f in l.fns.iter().filter_map(|f| f.name.clone()).take(10) {
+        println!("  {f}");
+    }
+    let scraped = resq_gui::state::scrape_struct_layouts(&l);
+    println!("scraped {} struct layouts, e.g.:", scraped.len());
+    for (name, def) in scraped.iter().take(6) {
+        println!("  {name}: size {}, {} fields", def.size, def.fields.len());
+    }
 }

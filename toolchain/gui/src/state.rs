@@ -1,7 +1,7 @@
 //! Loading + analysis state for the GUI. Pure `qvm` calls, no UI here, so it
 //! stays unit-testable.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use qvm::{disassemble, load, load_map, trap_name, Disassembly, Insn, Opcode, Qvm};
@@ -29,10 +29,13 @@ pub struct LocalDecl {
     pub index: Option<String>,
     /// Scale of `index`.
     pub stride: Option<i32>,
-    /// Absolute constant base (`+ (149584)`).
+    /// Absolute constant base (`loc = 218100` / `+ (149584)`).
     pub base_const: Option<i32>,
     /// Base loaded from a fixed address (`+ (*(<int>*)(0xf0850))`).
     pub base_deref: Option<i32>,
+    /// Chained base: `loc = (loc_M) + (K)` — pointer derived from another
+    /// local (resolved transitively by the struct census).
+    pub base_loc: Option<(String, i32)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -53,7 +56,7 @@ pub struct StructDb {
     pub map: HashMap<String, StructDef>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct StructFileDef {
     #[serde(default)]
     size: Option<i32>,
@@ -61,7 +64,8 @@ struct StructFileDef {
     fields: HashMap<String, String>,
 }
 
-static STRUCT_DB: std::sync::OnceLock<StructDb> = std::sync::OnceLock::new();
+static STRUCT_DB: std::sync::RwLock<Option<std::sync::Arc<StructDb>>> =
+    std::sync::RwLock::new(None);
 
 /// Data folders scanned for `*.json` catalogs: next to the exe, then cwd.
 fn data_dirs(sub: &str) -> Vec<PathBuf> {
@@ -75,51 +79,63 @@ fn data_dirs(sub: &str) -> Vec<PathBuf> {
     dirs
 }
 
+fn load_struct_db() -> StructDb {
+    let mut db = StructDb::default();
+    for dir in data_dirs("structs") {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut paths: Vec<_> = rd.flatten().collect();
+        paths.sort_by_key(|p| p.path());
+        for p in paths {
+            let fname = p.file_name();
+            let Some(name) = fname.to_str() else {
+                continue;
+            };
+            if !name.to_lowercase().ends_with(".json") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(p.path()) else {
+                continue;
+            };
+            let Ok(file) = serde_json::from_str::<HashMap<String, StructFileDef>>(&text) else {
+                eprintln!("structs: skipping unparseable {}", p.path().display());
+                continue;
+            };
+            for (ty, def) in file {
+                let fields: BTreeMap<i32, String> = def
+                    .fields
+                    .into_iter()
+                    .filter_map(|(k, v)| k.parse::<i32>().ok().map(|off| (off, v)))
+                    .collect();
+                db.map.insert(
+                    ty,
+                    StructDef {
+                        size: def.size.unwrap_or(0),
+                        fields,
+                    },
+                );
+            }
+        }
+    }
+    db
+}
+
 /// Load `structs/*.json` catalogs (exe dir + cwd, merged; same-name types
 /// from later files win). Format:
 /// `{ "gclient_t": { "size": 1568, "fields": { "704": "pers" } } }`.
-pub fn struct_db() -> &'static StructDb {
-    STRUCT_DB.get_or_init(|| {
-        let mut db = StructDb::default();
-        for dir in data_dirs("structs") {
-            let Ok(rd) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            let mut paths: Vec<_> = rd.flatten().collect();
-            paths.sort_by_key(|p| p.path());
-            for p in paths {
-                let fname = p.file_name();
-                let Some(name) = fname.to_str() else {
-                    continue;
-                };
-                if !name.to_lowercase().ends_with(".json") {
-                    continue;
-                }
-                let Ok(text) = std::fs::read_to_string(p.path()) else {
-                    continue;
-                };
-                let Ok(file) = serde_json::from_str::<HashMap<String, StructFileDef>>(&text) else {
-                    eprintln!("structs: skipping unparseable {}", p.path().display());
-                    continue;
-                };
-                for (ty, def) in file {
-                    let fields: BTreeMap<i32, String> = def
-                        .fields
-                        .into_iter()
-                        .filter_map(|(k, v)| k.parse::<i32>().ok().map(|off| (off, v)))
-                        .collect();
-                    db.map.insert(
-                        ty,
-                        StructDef {
-                            size: def.size.unwrap_or(0),
-                            fields,
-                        },
-                    );
-                }
-            }
-        }
-        db
-    })
+pub fn struct_db() -> std::sync::Arc<StructDb> {
+    if let Some(db) = STRUCT_DB.read().unwrap().clone() {
+        return db;
+    }
+    let db = std::sync::Arc::new(load_struct_db());
+    *STRUCT_DB.write().unwrap() = Some(db.clone());
+    db
+}
+
+/// Rescan the structs/ directories (the scrape tool adds auto.json).
+pub fn reload_struct_db() {
+    *STRUCT_DB.write().unwrap() = Some(std::sync::Arc::new(load_struct_db()));
 }
 
 /// Parse `loc_N) + (K))` at the start of `s` (the tail of a struct-field
@@ -147,6 +163,143 @@ fn parse_loc_field(s: &str) -> Option<(String, i32, usize)> {
 fn field_of(types: &HashMap<String, String>, db: &StructDb, loc: &str, off: i32) -> Option<String> {
     let def = db.map.get(types.get(loc)?)?;
     def.fields.get(&off).cloned()
+}
+
+/// All `(loc_X) + (K)` field accesses on one line.
+fn iter_field_accesses(line: &str) -> Vec<(String, i32)> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while let Some(p) = line[i..].find("(loc_") {
+        let start = i + p;
+        // Name starts after "(loc_" — scan from there, not from the paren.
+        let name_end = line[start + 5..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map_or(line.len(), |x| start + 5 + x);
+        let name = &line[start + 1..name_end];
+        if let Some(rest) = line[name_end..].strip_prefix(") + (") {
+            let num_end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            if num_end > 0 && rest[num_end..].starts_with(')') {
+                if let Ok(off) = rest[..num_end].parse::<i32>() {
+                    out.push((name.to_string(), off));
+                }
+            }
+        }
+        i = name_end;
+    }
+    out
+}
+
+/// Census of struct-field accesses across the whole image: group the
+/// `(loc_X) + (K)` offsets by loc_X's initialization base+stride and emit
+/// struct skeletons `auto_<base>_<stride>_t` sized by the stride with
+/// fields named `field_<off>`. The user renames fields in the JSON as
+/// they identify them; re-running merges new offsets (existing names win).
+pub fn scrape_struct_layouts(l: &Loaded) -> Vec<(String, StructDef)> {
+    // base key -> (stride, offsets relative to base).
+    let mut groups: HashMap<String, (Option<i32>, BTreeSet<i32>)> = HashMap::new();
+    for f in &l.fns {
+        let Ok(dec) = l.decompile(f.idx) else {
+            continue;
+        };
+        if dec.locals.is_empty() {
+            continue;
+        }
+        // loc -> (base key, stride, addend), chasing `loc = loc_M + K`.
+        let resolved: HashMap<String, (String, Option<i32>, i32)> = dec
+            .locals
+            .keys()
+            .filter_map(|n| resolve_base(&dec.locals, n, 0, 0).map(|r| (n.clone(), r)))
+            .collect();
+        if resolved.is_empty() {
+            continue;
+        }
+        for line in dec.text.lines() {
+            for (loc, off) in iter_field_accesses(line) {
+                if let Some((base, stride, add)) = resolved.get(&loc) {
+                    if base == "0x0" {
+                        continue; // NULL-sentinel temps, not a struct base
+                    }
+                    groups
+                        .entry(base.clone())
+                        .and_modify(|(s, offs)| {
+                            if s.is_none() {
+                                *s = *stride;
+                            }
+                            offs.insert(add + off);
+                        })
+                        .or_insert_with(|| (*stride, BTreeSet::from([add + off])));
+                }
+            }
+        }
+    }
+    let mut out: Vec<(String, StructDef)> = groups
+        .into_iter()
+        .map(|(base, (stride, offs))| {
+            let max_off = offs.iter().copied().max().unwrap_or(0);
+            let size = stride.unwrap_or((max_off + 4).max(4));
+            let fields: BTreeMap<i32, String> = offs
+                .into_iter()
+                .filter(|o| stride.is_none_or(|s| *o < s))
+                .map(|o| (o, format!("field_{o}")))
+                .collect();
+            let name = match stride {
+                Some(s) => format!("auto_{base}_{s}_t"),
+                None => format!("auto_{base}_t"),
+            };
+            (name, StructDef { size, fields })
+        })
+        .filter(|(_, d)| !d.fields.is_empty())
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Resolve a loc's base transitively (`loc = loc_M + K` chains): returns
+/// (base key, stride, total addend).
+fn resolve_base(
+    decls: &HashMap<String, LocalDecl>,
+    loc: &str,
+    add: i32,
+    depth: u8,
+) -> Option<(String, Option<i32>, i32)> {
+    if depth > 4 {
+        return None;
+    }
+    let d = decls.get(loc)?;
+    if let Some(v) = d.base_const {
+        return Some((format!("{v:#x}"), d.stride, add));
+    }
+    if let Some(v) = d.base_deref {
+        return Some((format!("{v:#x}"), d.stride, add));
+    }
+    let (bl, k) = d.base_loc.as_ref()?;
+    resolve_base(decls, bl, add + k, depth + 1)
+}
+
+/// Merge scraped skeletons into an existing `auto.json` text (existing
+/// field names win; new offsets and types are appended). Returns the JSON
+/// to write.
+pub fn merge_struct_json(
+    existing: &str,
+    scraped: &[(String, StructDef)],
+) -> Result<String, String> {
+    let mut file: HashMap<String, StructFileDef> =
+        serde_json::from_str(existing).unwrap_or_default();
+    for (name, def) in scraped {
+        let entry = file.entry(name.clone()).or_default();
+        if entry.size.is_none() {
+            entry.size = Some(def.size);
+        }
+        for (off, fname) in &def.fields {
+            entry
+                .fields
+                .entry(off.to_string())
+                .or_insert_with(|| fname.clone());
+        }
+    }
+    serde_json::to_string_pretty(&file).map_err(|e| e.to_string())
 }
 
 /// Ghidra-style struct typing on one identity-C line:
@@ -235,8 +388,9 @@ pub fn parse_num(t: &str) -> Option<i32> {
     }
 }
 
-/// Parse a `loc_N = ...;` line that builds an address from an optional
-/// `index * stride` term plus a constant or dereferenced-global base.
+/// Parse a `loc_N = ...;` line that builds an address: an optional
+/// `index * stride` term plus a base that is a constant, a dereferenced
+/// global, or another local (chained, e.g. `loc_20 = (loc_24) + (824);`).
 /// Recognizes the identity-C shapes emitted by `fmt_function_lines`;
 /// returns `None` for anything else (loads, copies, comparisons).
 pub fn parse_local_decl(line: &str) -> Option<(String, LocalDecl)> {
@@ -252,13 +406,16 @@ pub fn parse_local_decl(line: &str) -> Option<(String, LocalDecl)> {
         stride: None,
         base_const: None,
         base_deref: None,
+        base_loc: None,
     };
 
-    // `(149584)` | `(*(<int>*)(0xf0850))` -> fills base_* fields.
-    fn operand(s: &str, d: &mut LocalDecl) -> bool {
-        let Some(inner) = s.strip_prefix('(').and_then(|x| x.strip_suffix(')')) else {
-            return false;
-        };
+    // Base term: `218100` | `(218100)` | `*(<int>*(0xf0850))` | `loc_M` |
+    // `(loc_M)`. Returns true when one of them was recognized.
+    fn base_operand(s: &str, d: &mut LocalDecl) -> bool {
+        let inner = s
+            .strip_prefix('(')
+            .and_then(|x| x.strip_suffix(')'))
+            .unwrap_or(s);
         if let Some(h) = inner
             .strip_prefix("*(<int>*)(")
             .and_then(|x| x.strip_suffix(')'))
@@ -266,32 +423,60 @@ pub fn parse_local_decl(line: &str) -> Option<(String, LocalDecl)> {
             d.base_deref = parse_num(h);
             return d.base_deref.is_some();
         }
+        let is_loc = |w: &str| {
+            w.len() > 4 && w.starts_with("loc_") && w[4..].bytes().all(|b| b.is_ascii_digit())
+        };
+        if is_loc(inner) {
+            d.base_loc = Some((inner.to_string(), 0));
+            return true;
+        }
         d.base_const = parse_num(inner);
         d.base_const.is_some()
     }
 
     if let Some(p) = rhs.find(")+(") {
-        // `((idx) * (S)) + (base)`
         let l = rhs[..p + 1].to_string();
         let r = format!("({}", &rhs[p + 3..]);
-        if !(l.starts_with("((") && l.ends_with("))")) {
-            return None;
-        }
-        let inner = &l[1..l.len() - 1]; // `(arg_3)*(816)`
-        let (a, b) = inner.split_once("*(")?;
-        let idx = a.trim_start_matches('(').trim_end_matches(')');
-        if idx.is_empty() || !idx.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return None;
-        }
-        d.index = Some(idx.to_string());
-        d.stride = b.trim_end_matches(')').parse().ok();
-        d.stride?;
-        if !operand(&r, &mut d) {
-            return None;
+        let inner = l
+            .strip_prefix('(')
+            .and_then(|x| x.strip_suffix(')'))
+            .map(str::to_string)?;
+        if inner.starts_with("loc_") {
+            // `(loc_M) + (K)` — chained base with an addend.
+            let mut dd = LocalDecl {
+                index: None,
+                stride: None,
+                base_const: None,
+                base_deref: None,
+                base_loc: None,
+            };
+            if !base_operand(&l, &mut dd) || dd.base_loc.is_none() {
+                return None;
+            }
+            let k = r
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .parse::<i32>()
+                .ok()?;
+            dd.base_loc.as_mut().unwrap().1 = k;
+            d.base_loc = dd.base_loc;
+        } else {
+            // `((idx) * (S)) + (base)`
+            let (a, b) = inner.split_once("*(")?;
+            let idx = a.trim_start_matches('(').trim_end_matches(')');
+            if idx.is_empty() || !idx.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return None;
+            }
+            d.index = Some(idx.to_string());
+            d.stride = b.trim_end_matches(')').parse().ok();
+            d.stride?;
+            if !base_operand(&r, &mut d) {
+                return None;
+            }
         }
     } else {
-        // `(base)` only.
-        if !operand(rhs, &mut d) {
+        // `(base)` / `base` only.
+        if !base_operand(rhs, &mut d) {
             return None;
         }
     }
@@ -434,13 +619,21 @@ impl FnInfo {
         self.end == self.entry
     }
 
-    pub fn display_name(&self) -> &str {
-        self.name.as_deref().unwrap_or("unnamed")
+    /// Display name; unnamed functions get the `fn_<idx>` placeholder
+    /// (matches the identity-C call convention and the rename box).
+    pub fn display_name(&self) -> std::borrow::Cow<'_, str> {
+        match &self.name {
+            Some(n) => std::borrow::Cow::Borrowed(n),
+            None => std::borrow::Cow::Owned(format!("fn_{}", self.idx)),
+        }
     }
 
     /// Rebuild the lowercased filter blob from current metadata.
     pub fn rebuild_search(&mut self) {
-        let mut s = self.name.clone().unwrap_or_default();
+        let mut s = self
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("fn_{}", self.idx));
         s.push_str(&format!(" fn{} {} ", self.idx, self.entry));
         for (n, tn) in &self.traps {
             s.push_str(&format!("{n} {tn} "));
@@ -804,6 +997,58 @@ impl Loaded {
         self.types.get(&fn_entry)?.get(loc).map(String::as_str)
     }
 
+    /// Heuristic auto-naming for a clean image:
+    /// - the first function (the engine entry point) becomes `vmMain`;
+    /// - small functions that only marshal arguments and issue exactly one
+    ///   syscall become `trap_<Name>` thunks (unknown syscalls become
+    ///   `syscall_<num>`).
+    ///
+    /// Already-named functions are skipped. Returns (named, thunks).
+    pub fn auto_name_functions(&mut self) -> (usize, usize) {
+        let mut named = 0usize;
+        let mut thunks = 0usize;
+        let mut used: HashSet<String> = self.fns.iter().filter_map(|f| f.name.clone()).collect();
+
+        // vmMain: the engine calls the first function of the image.
+        if let Some(f) = self.fns.first_mut() {
+            if f.name.is_none() && !used.contains("vmMain") {
+                f.name = Some("vmMain".into());
+                f.rebuild_search();
+                used.insert("vmMain".into());
+                named += 1;
+            }
+        }
+
+        // Syscall thunks.
+        for f in &mut self.fns {
+            if f.name.is_some() || f.idx == 0 || f.traps.len() != 1 || f.len() > 48 {
+                continue;
+            }
+            // A thunk never calls other functions.
+            if !self.callees.get(&f.idx).is_none_or(|v| v.is_empty()) {
+                continue;
+            }
+            let (num, tname) = &f.traps[0];
+            let base = if tname == "?" {
+                format!("syscall_{num}")
+            } else {
+                tname.clone()
+            };
+            let mut cand = base.clone();
+            let mut k = 2;
+            while used.contains(&cand) {
+                cand = format!("{base}_{k}");
+                k += 1;
+            }
+            used.insert(cand.clone());
+            f.name = Some(cand);
+            f.rebuild_search();
+            named += 1;
+            thunks += 1;
+        }
+        (named, thunks)
+    }
+
     /// Apply/clear a struct type on a local; persists to the sidecar file
     /// next to the QVM (`<name>.types.json`).
     pub fn set_local_type(
@@ -963,7 +1208,7 @@ impl Loaded {
         let db = struct_db();
         let lines: Vec<(String, (usize, usize))> = lines
             .into_iter()
-            .map(|(t, r)| (rewrite_struct_fields(&t, &fn_types, db), r))
+            .map(|(t, r)| (rewrite_struct_fields(&t, &fn_types, &db), r))
             .collect();
         let text: String = lines
             .iter()

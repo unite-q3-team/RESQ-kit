@@ -825,6 +825,81 @@ impl App {
         }
     }
 
+    /// Heuristic auto-naming (fast, synchronous).
+    fn auto_name_action(&mut self) {
+        let Some(l) = &mut self.loaded else {
+            self.status = self.tr("nothing loaded").into();
+            return;
+        };
+        let (named, thunks) = l.auto_name_functions();
+        // Names changed: list rows, graph node widths and decompiled C.
+        self.gen += 1;
+        self.fn_rows = None;
+        self.c_cache.clear();
+        self.c_order.clear();
+        self.img_w.clear();
+        self.img_colw.clear();
+        self.status = self.trf(
+            "auto-named %N functions (%M syscall thunks)",
+            &[("N", &named), ("M", &thunks)],
+        );
+    }
+
+    /// Struct-layout census (background thread, result -> structs/auto.json).
+    fn scrape_structs_action(&mut self) {
+        let Some(l) = &self.loaded else {
+            self.status = self.tr("nothing loaded").into();
+            return;
+        };
+        if self.export_rx.is_some() {
+            self.status = self.tr("export already running…").into();
+            return;
+        }
+        let src = l.path.clone();
+        let lang = self.lang;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.status = self.tr("scraping struct layouts…").to_string();
+        std::thread::Builder::new()
+            .name("resq-scrape".into())
+            .spawn(move || {
+                let msg = match Loaded::open(&src) {
+                    Ok(l) => {
+                        let scraped = crate::state::scrape_struct_layouts(&l);
+                        // Merge into structs/auto.json in the working dir.
+                        let dir = std::path::PathBuf::from("structs");
+                        let _ = std::fs::create_dir_all(&dir);
+                        let out = dir.join("auto.json");
+                        let existing = std::fs::read_to_string(&out).unwrap_or_default();
+                        match crate::state::merge_struct_json(&existing, &scraped).and_then(
+                            |text| {
+                                std::fs::write(&out, text)
+                                    .map_err(|e| format!("write {}: {e}", out.display()))
+                            },
+                        ) {
+                            Ok(()) => {
+                                // New skeletons become available immediately.
+                                crate::state::reload_struct_db();
+                                i18n::trf(
+                                    lang,
+                                    "scraped %N struct layouts -> %P",
+                                    &[("N", &scraped.len()), ("P", &out.display())],
+                                )
+                            }
+                            Err(e) => i18n::trf(
+                                lang,
+                                "scrape: write %P: %ERR",
+                                &[("P", &out.display()), ("ERR", &e)],
+                            ),
+                        }
+                    }
+                    Err(e) => i18n::trf(lang, "scrape: reopen: %ERR", &[("ERR", &e)]),
+                };
+                let _ = tx.send(msg);
+            })
+            .expect("spawn scrape thread");
+        self.export_rx = Some(rx);
+    }
+
     fn export_disasm(&mut self) {
         let Some(l) = &self.loaded else {
             self.status = self.tr("nothing loaded").into();
@@ -1069,6 +1144,27 @@ impl App {
 
                 // ---- Tools -----------------------------------------------
                 ui.menu_button(self.tr("Tools"), |ui| {
+                    if ui
+                        .button(self.tr("Auto-name functions"))
+                        .on_hover_text(self.tr("name vmMain + syscall wrapper thunks (heuristic)"))
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.auto_name_action();
+                    }
+                    if ui
+                        .button(self.tr("Scrape struct layouts"))
+                        .on_hover_text(
+                            self.tr(
+                                "census of (base, stride, offset) -> structs/auto.json skeletons",
+                            ),
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.scrape_structs_action();
+                    }
+                    ui.separator();
                     if ui.button(self.tr("Export disassembly (.txt)")).clicked() {
                         ui.close_menu();
                         self.export_disasm();
@@ -2364,7 +2460,8 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                         ui.label(t);
                         let applied = l.local_type(sink.fn_entry, t).map(str::to_string);
                         ui.menu_button(i18n::tr(sink.lang, "Apply struct"), |ui| {
-                            let mut names: Vec<&String> = struct_db().map.keys().collect();
+                            let db = struct_db();
+                            let mut names: Vec<&String> = db.map.keys().collect();
                             names.sort();
                             if names.is_empty() {
                                 ui.label(i18n::tr(sink.lang, "no structs loaded (structs/*.json)"));
@@ -2403,9 +2500,10 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                         field_base_loc(sink.c_line, t).map(|loc| {
                             let off = val.unwrap_or(0);
                             // Applied struct type -> name the field.
+                            let db = struct_db();
                             let typed = l
                                 .local_type(sink.fn_entry, &loc)
-                                .and_then(|ty| struct_db().map.get(ty).map(|d| (ty, d)))
+                                .and_then(|ty| db.map.get(ty).map(|d| (ty, d)))
                                 .and_then(|(ty, d)| d.fields.get(&off).map(|f| (ty, f)));
                             let mut h = if let Some((ty, f)) = typed {
                                 format!("{loc}->{f}  ({ty} + {off})")
@@ -2589,7 +2687,7 @@ fn image_graph_pane(
     // Measure content-sized world widths once per load (font-size 1.0 basis).
     if img_w.is_empty() && n > 0 {
         for f in &l.fns {
-            let mut w = p_width(ui, f.display_name(), 10.0);
+            let mut w = p_width(ui, &f.display_name(), 10.0);
             w = w.max(p_width(
                 ui,
                 &i18n::trf(
