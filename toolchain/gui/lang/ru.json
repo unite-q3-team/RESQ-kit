@@ -114,7 +114,12 @@
     "Show CFG": "Показать CFG",
     "Center on this node": "Центрировать на узле",
     "Scroll Disassembly here": "Показать в дизассемблере",
-    "Copy insn range": "Копировать диапазон инсн."
+    "Copy insn range": "Копировать диапазон инсн.",
+    "Apply struct": "Применить структуру",
+    "(clear type)": "(снять тип)",
+    "no structs loaded (structs/*.json)": "нет структур (structs/*.json)",
+    "typed %LOC -> %TY (%P)": "тип применён: %LOC -> %TY (%P)",
+    "type cleared: %LOC": "тип снят: %LOC"
   },
 
   "opcode_help": {

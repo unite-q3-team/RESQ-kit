@@ -12,7 +12,9 @@ use egui::{Color32, RichText, Sense, TextWrapMode};
 use qvm::Opcode;
 
 use crate::i18n::{self, LangId};
-use crate::state::{escape, insn_bytes, opcode_help, parse_num, Decompiled, Loaded, LocalDecl};
+use crate::state::{
+    escape, insn_bytes, opcode_help, parse_num, struct_db, Decompiled, Loaded, LocalDecl,
+};
 
 /// Keep at most this many decompiled functions cached (FIFO eviction).
 const C_CACHE_CAP: usize = 128;
@@ -306,6 +308,10 @@ struct Sink<'a> {
     c_line: &'a str,
     /// Tracked `loc_N` initializations of the function being shown.
     locals: &'a HashMap<String, LocalDecl>,
+    /// Entry insn of the function being shown (types are keyed by it).
+    fn_entry: usize,
+    /// Apply/clear a struct type on a `loc_N` (Identity C pane).
+    apply_type: &'a mut Option<(usize, String, Option<String>)>,
 }
 
 pub struct App {
@@ -1682,6 +1688,7 @@ impl App {
             let mut new_c_range: Option<(usize, usize)> = None;
             let mut flash_loc: Option<usize> = None;
             let mut c_goto_loc: Option<usize> = None;
+            let mut apply_type_loc: Option<(usize, String, Option<String>)> = None;
             let scroll_req: Option<usize> = self.scroll_to.take();
             let mut pending_scroll: Option<usize> = None;
 
@@ -1737,6 +1744,8 @@ impl App {
                                 lang: self.lang,
                                 c_line: "",
                                 locals: &dec.locals,
+                                fn_entry: l.fns[sel].entry,
+                                apply_type: &mut apply_type_loc,
                             };
                             render_row(ui, l, &segs, &mut sink);
                             // Instruction help tooltip. Created last => on top
@@ -1799,6 +1808,8 @@ impl App {
                                 lang: self.lang,
                                 c_line: c_rows[i],
                                 locals: &dec.locals,
+                                fn_entry: l.fns[sel].entry,
+                                apply_type: &mut apply_type_loc,
                             };
                             render_row(ui, l, &segs, &mut sink);
                             // Hover/click a C line -> highlight its instructions.
@@ -1893,6 +1904,25 @@ impl App {
             }
             if let Some(j) = jump_loc {
                 self.jump_to(j, true);
+            }
+            if let Some((entry, loc, ty)) = apply_type_loc {
+                if let Some(x) = &mut self.loaded {
+                    match x.set_local_type(entry, &loc, ty.as_deref()) {
+                        Ok(p) => {
+                            self.status = match ty.as_deref() {
+                                Some(t) => self.trf(
+                                    "typed %LOC -> %TY (%P)",
+                                    &[("LOC", &loc), ("TY", &t), ("P", &p.display())],
+                                ),
+                                None => self.trf("type cleared: %LOC", &[("LOC", &loc)]),
+                            };
+                        }
+                        Err(e) => self.status = e,
+                    }
+                    // Decompiled C of this function changed.
+                    self.c_cache.clear();
+                    self.c_order.clear();
+                }
             }
         });
     }
@@ -2315,17 +2345,45 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                 }
                 Seg::LocTok(t, off) => {
                     let r = tok_label(ui, t, C_SLOT);
-                    // Provenance hint: where this frame slot got its value.
+                    // Provenance hint: applied type + where this frame slot
+                    // got its value.
                     if sink.token_hints && pointer_in(ui, &r) {
                         let mut h = i18n::mem_hint_phrase(sink.lang, "hint.local")
                             .unwrap_or_else(|| "local variable (frame+%N)".into())
                             .replace("%N", &off.to_string());
+                        if let Some(ty) = l.local_type(sink.fn_entry, t) {
+                            h.push_str(&format!("\n{ty}"));
+                        }
                         if let Some(src) = local_provenance(l, sink, t) {
                             h.push('\n');
                             h.push_str(&src);
                         }
                         r.show_tooltip_text(RichText::new(h).monospace());
                     }
+                    r.context_menu(|ui| {
+                        ui.label(t);
+                        let applied = l.local_type(sink.fn_entry, t).map(str::to_string);
+                        ui.menu_button(i18n::tr(sink.lang, "Apply struct"), |ui| {
+                            let mut names: Vec<&String> = struct_db().map.keys().collect();
+                            names.sort();
+                            if names.is_empty() {
+                                ui.label(i18n::tr(sink.lang, "no structs loaded (structs/*.json)"));
+                            }
+                            for name in names {
+                                if ui.button(name).clicked() {
+                                    ui.close_menu();
+                                    *sink.apply_type =
+                                        Some((sink.fn_entry, t.clone(), Some(name.clone())));
+                                }
+                            }
+                            if applied.is_some()
+                                && ui.button(i18n::tr(sink.lang, "(clear type)")).clicked()
+                            {
+                                ui.close_menu();
+                                *sink.apply_type = Some((sink.fn_entry, t.clone(), None));
+                            }
+                        });
+                    });
                 }
                 Seg::NumTok(t) => {
                     let val = parse_num(t);
@@ -2343,15 +2401,22 @@ fn render_row(ui: &mut egui::Ui, l: &Loaded, segs: &[Seg], sink: &mut Sink) {
                     // `((loc_X) + (K))` field access -> struct-field hint.
                     let hint = addr_hint.or_else(|| {
                         field_base_loc(sink.c_line, t).map(|loc| {
-                            let mut h = i18n::mem_hint_phrase(sink.lang, "hint.field")
-                                .unwrap_or_else(|| {
-                                    "field at offset +%OFF of the struct at %LOC".into()
-                                })
-                                .replace(
-                                    "%OFF",
-                                    &val.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
-                                )
-                                .replace("%LOC", &loc);
+                            let off = val.unwrap_or(0);
+                            // Applied struct type -> name the field.
+                            let typed = l
+                                .local_type(sink.fn_entry, &loc)
+                                .and_then(|ty| struct_db().map.get(ty).map(|d| (ty, d)))
+                                .and_then(|(ty, d)| d.fields.get(&off).map(|f| (ty, f)));
+                            let mut h = if let Some((ty, f)) = typed {
+                                format!("{loc}->{f}  ({ty} + {off})")
+                            } else {
+                                i18n::mem_hint_phrase(sink.lang, "hint.field")
+                                    .unwrap_or_else(|| {
+                                        "field at offset +%OFF of the struct at %LOC".into()
+                                    })
+                                    .replace("%OFF", &off.to_string())
+                                    .replace("%LOC", &loc)
+                            };
                             if let Some(src) = local_provenance(l, sink, &loc) {
                                 h.push('\n');
                                 h.push_str(&src);

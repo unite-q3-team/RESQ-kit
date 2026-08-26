@@ -35,6 +35,197 @@ pub struct LocalDecl {
     pub base_deref: Option<i32>,
 }
 
+// ---------------------------------------------------------------------------
+// Struct type database (`structs/*.json`, user-extensible; Ghidra-style
+// "apply type" turns `(loc_20) + (704)` into `loc_20->pers`).
+// ---------------------------------------------------------------------------
+
+/// One named struct type: total size + field names by byte offset.
+#[derive(Clone, Debug, Default)]
+pub struct StructDef {
+    pub size: i32,
+    pub fields: BTreeMap<i32, String>,
+}
+
+/// All loaded struct types, keyed by type name.
+#[derive(Clone, Debug, Default)]
+pub struct StructDb {
+    pub map: HashMap<String, StructDef>,
+}
+
+#[derive(serde::Deserialize)]
+struct StructFileDef {
+    #[serde(default)]
+    size: Option<i32>,
+    #[serde(default)]
+    fields: HashMap<String, String>,
+}
+
+static STRUCT_DB: std::sync::OnceLock<StructDb> = std::sync::OnceLock::new();
+
+/// Data folders scanned for `*.json` catalogs: next to the exe, then cwd.
+fn data_dirs(sub: &str) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            dirs.push(d.join(sub));
+        }
+    }
+    dirs.push(PathBuf::from(sub));
+    dirs
+}
+
+/// Load `structs/*.json` catalogs (exe dir + cwd, merged; same-name types
+/// from later files win). Format:
+/// `{ "gclient_t": { "size": 1568, "fields": { "704": "pers" } } }`.
+pub fn struct_db() -> &'static StructDb {
+    STRUCT_DB.get_or_init(|| {
+        let mut db = StructDb::default();
+        for dir in data_dirs("structs") {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut paths: Vec<_> = rd.flatten().collect();
+            paths.sort_by_key(|p| p.path());
+            for p in paths {
+                let fname = p.file_name();
+                let Some(name) = fname.to_str() else {
+                    continue;
+                };
+                if !name.to_lowercase().ends_with(".json") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(p.path()) else {
+                    continue;
+                };
+                let Ok(file) = serde_json::from_str::<HashMap<String, StructFileDef>>(&text) else {
+                    eprintln!("structs: skipping unparseable {}", p.path().display());
+                    continue;
+                };
+                for (ty, def) in file {
+                    let fields: BTreeMap<i32, String> = def
+                        .fields
+                        .into_iter()
+                        .filter_map(|(k, v)| k.parse::<i32>().ok().map(|off| (off, v)))
+                        .collect();
+                    db.map.insert(
+                        ty,
+                        StructDef {
+                            size: def.size.unwrap_or(0),
+                            fields,
+                        },
+                    );
+                }
+            }
+        }
+        db
+    })
+}
+
+/// Parse `loc_N) + (K))` at the start of `s` (the tail of a struct-field
+/// access); returns the loc name, the offset and the consumed length.
+fn parse_loc_field(s: &str) -> Option<(String, i32, usize)> {
+    let name_end = s
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(s.len());
+    let name = &s[..name_end];
+    if !(name.len() > 4
+        && name.starts_with("loc_")
+        && name[4..].bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    let rest = s[name_end..].strip_prefix(") + (")?;
+    let num_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let off = rest[..num_end].parse::<i32>().ok()?;
+    rest[num_end..].strip_prefix("))")?;
+    Some((name.to_string(), off, name_end + 5 + num_end + 2))
+}
+
+fn field_of(types: &HashMap<String, String>, db: &StructDb, loc: &str, off: i32) -> Option<String> {
+    let def = db.map.get(types.get(loc)?)?;
+    def.fields.get(&off).cloned()
+}
+
+/// Ghidra-style struct typing on one identity-C line:
+/// `*(<int>*)((loc_X) + (K))` -> `(loc_X->f)` and the bare address form
+/// `((loc_X) + (K))` -> `(&loc_X->f)` when a struct type is applied to
+/// loc_X and K is a known field offset. Unresolved shapes stay as-is.
+fn rewrite_struct_fields(line: &str, types: &HashMap<String, String>, db: &StructDb) -> String {
+    let mut out = String::with_capacity(line.len() + 32);
+
+    // Pass 1: deref reads/writes.
+    const DEREF: &str = "*(<int>*)((";
+    let mut rest = line;
+    loop {
+        match rest.find(DEREF) {
+            None => {
+                out.push_str(rest);
+                break;
+            }
+            Some(p) => {
+                out.push_str(&rest[..p]);
+                let after = &rest[p + DEREF.len()..];
+                match parse_loc_field(after) {
+                    Some((loc, off, consumed)) => match field_of(types, db, &loc, off) {
+                        Some(f) => {
+                            out.push_str(&format!("({loc}->{f})"));
+                            rest = &after[consumed..];
+                        }
+                        None => {
+                            out.push_str(DEREF);
+                            out.push_str(&after[..consumed]);
+                            rest = &after[consumed..];
+                        }
+                    },
+                    None => {
+                        out.push_str(DEREF);
+                        rest = after;
+                    }
+                }
+            }
+        }
+    }
+
+    // Pass 2: bare address form (e.g. passed to a function).
+    let mid = out;
+    let mut out = String::with_capacity(mid.len() + 8);
+    let mut rest = mid.as_str();
+    const ADDR: &str = "((";
+    loop {
+        match rest.find(ADDR) {
+            None => {
+                out.push_str(rest);
+                break;
+            }
+            Some(p) => {
+                out.push_str(&rest[..p]);
+                let after = &rest[p + ADDR.len()..];
+                match parse_loc_field(after) {
+                    Some((loc, off, consumed)) => match field_of(types, db, &loc, off) {
+                        Some(f) => {
+                            out.push_str(&format!("(&{loc}->{f})"));
+                            rest = &after[consumed..];
+                        }
+                        None => {
+                            out.push_str(ADDR);
+                            out.push_str(&after[..consumed]);
+                            rest = &after[consumed..];
+                        }
+                    },
+                    None => {
+                        out.push_str(ADDR);
+                        rest = after;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Parse a numeric literal: decimal or 0x-prefixed hex.
 pub fn parse_num(t: &str) -> Option<i32> {
     if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
@@ -311,6 +502,9 @@ pub struct Loaded {
     /// Any CONST memory operand (not a call target) -> functions
     /// referencing it. Backs the `mem_hint` tooltips and address xrefs.
     pub const_refs: BTreeMap<i32, Vec<usize>>,
+    /// Applied struct types: fn entry insn -> (loc name -> type name).
+    /// Persisted in a sidecar `<name>.types.json` next to the QVM.
+    pub types: HashMap<usize, HashMap<String, String>>,
 }
 
 impl Loaded {
@@ -327,6 +521,17 @@ impl Loaded {
                     }
                 }
                 Err(e) => return Err(format!("load {}: {e}", map_sibling.display())),
+            }
+        }
+
+        // Applied struct types (sidecar next to the QVM); corrupt file = fresh.
+        let mut types: HashMap<usize, HashMap<String, String>> = HashMap::new();
+        let types_sidecar = path.with_extension("types.json");
+        if types_sidecar.is_file() {
+            if let Ok(text) = std::fs::read_to_string(&types_sidecar) {
+                if let Ok(t) = serde_json::from_str(&text) {
+                    types = t;
+                }
             }
         }
 
@@ -590,7 +795,39 @@ impl Loaded {
             bss_range,
             bss_refs,
             const_refs,
+            types,
         })
+    }
+
+    /// Struct type applied to a local of this function, if any.
+    pub fn local_type(&self, fn_entry: usize, loc: &str) -> Option<&str> {
+        self.types.get(&fn_entry)?.get(loc).map(String::as_str)
+    }
+
+    /// Apply/clear a struct type on a local; persists to the sidecar file
+    /// next to the QVM (`<name>.types.json`).
+    pub fn set_local_type(
+        &mut self,
+        fn_entry: usize,
+        loc: &str,
+        ty: Option<&str>,
+    ) -> Result<PathBuf, String> {
+        let m = self.types.entry(fn_entry).or_default();
+        match ty {
+            Some(t) => {
+                m.insert(loc.to_string(), t.to_string());
+            }
+            None => {
+                m.remove(loc);
+            }
+        }
+        if m.is_empty() {
+            self.types.remove(&fn_entry);
+        }
+        let out = self.path.with_extension("types.json");
+        let text = serde_json::to_string_pretty(&self.types).map_err(|e| e.to_string())?;
+        std::fs::write(&out, text).map_err(|e| format!("write {}: {e}", out.display()))?;
+        Ok(out)
     }
 
     /// CFG of one function.
@@ -720,6 +957,14 @@ impl Loaded {
         let frame = self.d.insns[cfg.entry].operand.unwrap_or(0);
         let fun = qvm::decompile_function(&self.d, &cfg, frame, &data);
         let lines = qvm::fmt_function_lines(&fun, &self.qvm);
+        // Ghidra-style struct typing: applied types rewrite field accesses
+        // (`*(<int>*)((loc_X) + (K))` -> `(loc_X->f)`) before caching.
+        let fn_types = self.types.get(&f.entry).cloned().unwrap_or_default();
+        let db = struct_db();
+        let lines: Vec<(String, (usize, usize))> = lines
+            .into_iter()
+            .map(|(t, r)| (rewrite_struct_fields(&t, &fn_types, db), r))
+            .collect();
         let text: String = lines
             .iter()
             .map(|(t, _)| t.as_str())
@@ -861,7 +1106,7 @@ mod tests {
         bytes.extend_from_slice(&code);
         std::fs::write(&path, &bytes).expect("write");
 
-        let l = Loaded::open(&path).expect("open");
+        let mut l = Loaded::open(&path).expect("open");
         // NULL sentinel and outside-of-memory addresses get no hint.
         assert_eq!(l.mem_hint(0, LangId::EN), None);
         assert_eq!(l.mem_hint(-1, LangId::EN), None);
@@ -886,6 +1131,22 @@ mod tests {
         );
         assert!(opcode_help(Opcode::Enter, ru).contains("пролог функции"));
         assert!(opcode_help(Opcode::Const, ru).contains("константу"));
+
+        // Struct typing: apply -> sidecar written -> reload picks it up.
+        let entry = l.fns[0].entry;
+        assert_eq!(l.local_type(entry, "loc_0"), None);
+        let sidecar = l
+            .set_local_type(entry, "loc_0", Some("example_struct_t"))
+            .expect("save sidecar");
+        assert!(sidecar.is_file());
+        assert_eq!(l.local_type(entry, "loc_0"), Some("example_struct_t"));
+        {
+            let l2 = Loaded::open(&path).expect("reopen");
+            assert_eq!(l2.local_type(entry, "loc_0"), Some("example_struct_t"));
+        }
+        l.set_local_type(entry, "loc_0", None).expect("clear type");
+        assert_eq!(l.local_type(entry, "loc_0"), None);
+        std::fs::remove_file(&sidecar).ok();
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
@@ -929,5 +1190,68 @@ mod tests {
             None
         );
         assert_eq!(parse_local_decl("arg_3 = (5);"), None);
+    }
+
+    fn test_db() -> StructDb {
+        let mut fields = BTreeMap::new();
+        fields.insert(704, "pers".to_string());
+        fields.insert(712, "ps".to_string());
+        let mut map = HashMap::new();
+        map.insert("gclient_t".to_string(), StructDef { size: 1568, fields });
+        StructDb { map }
+    }
+
+    fn types1() -> HashMap<String, String> {
+        HashMap::from([("loc_20".to_string(), "gclient_t".to_string())])
+    }
+
+    #[test]
+    fn rewrite_struct_fields_names_known_offsets() {
+        let db = test_db();
+        let ty = types1();
+
+        // deref write
+        assert_eq!(
+            rewrite_struct_fields("  *(<int>*)((loc_20) + (704)) = 0;", &ty, &db),
+            "  (loc_20->pers) = 0;"
+        );
+        // deref read in a comparison
+        assert_eq!(
+            rewrite_struct_fields(
+                "  if ((*(<int>*)((loc_20) + (712))) != (0)) goto L94017;",
+                &ty,
+                &db
+            ),
+            "  if (((loc_20->ps)) != (0)) goto L94017;"
+        );
+        // bare address form (outer parens are part of the match)
+        assert_eq!(
+            rewrite_struct_fields("  f((loc_20) + (704));", &ty, &db),
+            "  f(&loc_20->pers);"
+        );
+        // unknown offset stays as-is
+        assert_eq!(
+            rewrite_struct_fields("  *(<int>*)((loc_20) + (708)) = 1;", &ty, &db),
+            "  *(<int>*)((loc_20) + (708)) = 1;"
+        );
+        // no type applied -> untouched
+        assert_eq!(
+            rewrite_struct_fields("  *(<int>*)((loc_24) + (704)) = 0;", &HashMap::new(), &db),
+            "  *(<int>*)((loc_24) + (704)) = 0;"
+        );
+        // arithmetic on a dereferenced value is NOT a field access
+        assert_eq!(
+            rewrite_struct_fields("  loc_32 = (*(<int>*)(loc_20)) + (264);", &ty, &db),
+            "  loc_32 = (*(<int>*)(loc_20)) + (264);"
+        );
+        // several accesses on one line
+        assert_eq!(
+            rewrite_struct_fields(
+                "  *(<int>*)((loc_20) + (704)) = *(<int>*)((loc_20) + (712));",
+                &ty,
+                &db
+            ),
+            "  (loc_20->pers) = (loc_20->ps);"
+        );
     }
 }

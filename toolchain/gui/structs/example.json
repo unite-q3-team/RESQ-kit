@@ -1,0 +1,11 @@
+{
+  "example_struct_t": {
+    "size": 64,
+    "fields": {
+      "0": "first",
+      "4": "second",
+      "8": "name",
+      "32": "data"
+    }
+  }
+}
