@@ -1499,4 +1499,104 @@ mod tests {
             "  (loc_20->pers) = (loc_20->ps);"
         );
     }
+
+    #[test]
+    fn display_name_placeholder_matches_fn_convention() {
+        let mut f = FnInfo {
+            idx: 12,
+            entry: 300,
+            end: 400,
+            name: None,
+            traps: vec![],
+            strings: vec![],
+            search: String::new(),
+        };
+        assert_eq!(f.display_name(), "fn_12");
+        f.rebuild_search();
+        assert!(f.search.contains("fn_12"), "{}", f.search);
+        f.name = Some("G_Spawn".into());
+        assert_eq!(f.display_name(), "G_Spawn");
+    }
+
+    #[test]
+    fn auto_name_names_vmmain_and_skips_named() {
+        // Minimal one-function image.
+        let dir = std::env::temp_dir().join(format!("resq_gui_auto_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("auto.qvm");
+        let code = {
+            let mut c = vec![3u8]; // ENTER 16
+            c.extend_from_slice(&16i32.to_le_bytes());
+            c.push(4); // LEAVE 16
+            c.extend_from_slice(&16i32.to_le_bytes());
+            c
+        };
+        let header: [i32; 8] = [
+            qvm::loader::VM_MAGIC as i32,
+            2,
+            32,
+            code.len() as i32,
+            32 + code.len() as i32,
+            0,
+            0,
+            64,
+        ];
+        let mut bytes = Vec::new();
+        for v in header {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        bytes.extend_from_slice(&code);
+        std::fs::write(&path, &bytes).expect("write");
+
+        let mut l = Loaded::open(&path).expect("open");
+        assert_eq!(l.fns[0].display_name(), "fn_0");
+
+        // First run names the entry function vmMain.
+        let (named, thunks) = l.auto_name_functions();
+        assert_eq!((named, thunks), (1, 0));
+        assert_eq!(l.fns[0].display_name(), "vmMain");
+
+        // Second run: everything is already named -> no-op.
+        let (named, thunks) = l.auto_name_functions();
+        assert_eq!((named, thunks), (0, 0));
+        assert_eq!(l.fns[0].display_name(), "vmMain");
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn iter_field_accesses_collects_all_offsets() {
+        let hits =
+            iter_field_accesses("  *(<int>*)((loc_20) + (704)) = *(<int>*)((loc_20) + (712));");
+        assert_eq!(
+            hits,
+            vec![("loc_20".to_string(), 704), ("loc_20".to_string(), 712)]
+        );
+        // Arithmetic on a deref is not a field access.
+        assert!(iter_field_accesses("  loc_32 = (*(<int>*)(loc_20)) + (264);").is_empty());
+        // No closing paren after digits -> rejected.
+        assert!(iter_field_accesses("  f((loc_20) + (704").is_empty());
+    }
+
+    #[test]
+    fn merge_struct_json_keeps_existing_field_names() {
+        let existing = r#"{"auto_t": {"size": 16, "fields": {"8": "renamed"}}}"#;
+        let scraped = vec![(
+            "auto_t".to_string(),
+            StructDef {
+                size: 32,
+                fields: BTreeMap::from([(0, "field_0".into()), (8, "field_8".into())]),
+            },
+        )];
+        let out = merge_struct_json(existing, &scraped).expect("merge");
+        assert!(out.contains("\"renamed\""), "{out}");
+        assert!(out.contains("field_0"), "{out}");
+        assert!(!out.contains("field_8"), "{out}");
+        // Size of an existing type is preserved.
+        assert!(out.contains("\"size\": 16"), "{out}");
+        // Broken existing text starts from scratch.
+        let out2 = merge_struct_json("not json", &scraped).expect("merge fresh");
+        assert!(out2.contains("field_8"), "{out2}");
+    }
 }
