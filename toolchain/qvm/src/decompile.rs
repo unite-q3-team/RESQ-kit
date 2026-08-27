@@ -1691,11 +1691,9 @@ pub fn reachable_blocks(f: &Function) -> Vec<bool> {
                     mark(*t, &mut reach, &mut queue);
                 }
             }
-            Terminator::Fallthrough => {
-                if bi + 1 < f.blocks.len() {
-                    reach[bi + 1] = true;
-                    queue.push(bi + 1);
-                }
+            Terminator::Fallthrough if bi + 1 < f.blocks.len() => {
+                reach[bi + 1] = true;
+                queue.push(bi + 1);
             }
             _ => {}
         }
