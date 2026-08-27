@@ -1722,7 +1722,10 @@ pub fn fmt_function_lines(f: &Function, q: &Qvm) -> Vec<FmtLine> {
     let mut lines: Vec<FmtLine> = Vec::new();
     let mut out = |text: String, range: (usize, usize)| lines.push((text, range));
     out(
-        format!("// function @ insn {}..{} frame {}", f.start, f.end, f.frame),
+        format!(
+            "// function @ insn {}..{} frame {}",
+            f.start, f.end, f.frame
+        ),
         whole,
     );
     // Signature: real name when known, arity from ARG marshaling. The QVM
@@ -1733,7 +1736,10 @@ pub fn fmt_function_lines(f: &Function, q: &Qvm) -> Vec<FmtLine> {
     let args = if f.arity == 0 {
         "void".to_string()
     } else {
-        (0..f.arity).map(|i| format!("int a{i}")).collect::<Vec<_>>().join(", ")
+        (0..f.arity)
+            .map(|i| format!("int a{i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     let ret = if f.returns { "int" } else { "void" };
     out(format!("{ret} {name}({args}) {{"), whole);
@@ -1741,7 +1747,11 @@ pub fn fmt_function_lines(f: &Function, q: &Qvm) -> Vec<FmtLine> {
         if !reach[bi] {
             continue;
         }
-        let end = f.blocks.get(bi + 1).map_or(f.end, |nb| nb.start).max(b.start);
+        let end = f
+            .blocks
+            .get(bi + 1)
+            .map_or(f.end, |nb| nb.start)
+            .max(b.start);
         let span = (b.start, end);
         out(format!("L{}:", b.start), (b.start, end));
         for st in &b.body {
@@ -1790,7 +1800,10 @@ pub fn fmt_function_lines(f: &Function, q: &Qvm) -> Vec<FmtLine> {
             Terminator::Return(None) => out("  return;".to_string(), span),
             Terminator::Goto(t) => out(format!("  goto L{t};"), span),
             Terminator::IfGoto { cond, target } => {
-                out(format!("  if ({}) goto L{target};", fmt_expr(q, f.frame, cond)), span);
+                out(
+                    format!("  if ({}) goto L{target};", fmt_expr(q, f.frame, cond)),
+                    span,
+                );
             }
             Terminator::Unresolved(a) => {
                 out(
