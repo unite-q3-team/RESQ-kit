@@ -227,8 +227,62 @@ impl PluginHost {
         dirs
     }
 
-    /// Rescan all plugin dirs. A folder wins if it parses; duplicates (same
-    /// plugin name in a later dir) are skipped.
+    /// Dev-mode fallback: plugin repos checked out next to this repo with a
+    /// root `resq-plugin.toml` and a built binary in `target/{release,debug}`.
+    /// Keeps the edit-build-run loop free of manual copy steps; in packaged
+    /// builds nothing matches and `plugins/` is the only source.
+    fn dev_candidates() -> Vec<PluginEntry> {
+        let mut bases: Vec<PathBuf> = Vec::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            // Depth 4 reaches the sibling layout
+            // GitHub/{RESQ-kit/toolchain/gui, resq-mcp}.
+            for a in cwd.ancestors().take(4) {
+                bases.push(a.to_path_buf());
+            }
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(d) = exe.parent() {
+                for a in d.ancestors().take(4) {
+                    bases.push(a.to_path_buf());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for base in bases {
+            let Ok(rd) = std::fs::read_dir(&base) else {
+                continue;
+            };
+            let mut folders: Vec<_> = rd.flatten().collect();
+            folders.sort_by_key(|p| p.path());
+            for f in folders {
+                let path = f.path();
+                if !path.is_dir() || !path.join("resq-plugin.toml").is_file() {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(path.join("resq-plugin.toml")) else {
+                    continue;
+                };
+                let Ok(manifest) = Manifest::parse(&text) else {
+                    continue;
+                };
+                for profile in ["release", "debug"] {
+                    let exe = path.join("target").join(profile).join(format!(
+                        "{}{}",
+                        manifest.name,
+                        std::env::consts::EXE_SUFFIX
+                    ));
+                    if exe.is_file() {
+                        out.push(PluginEntry { manifest, exe });
+                        break;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Rescan all sources: `plugins/` dirs first (they win), then dev
+    /// sibling checkouts not already covered.
     pub fn rescan(&mut self) {
         self.dirs = Self::plugin_dirs();
         self.found = Vec::new();
@@ -263,6 +317,11 @@ impl PluginHost {
                 if seen.insert(manifest.name.clone()) {
                     self.found.push(PluginEntry { manifest, exe });
                 }
+            }
+        }
+        for e in Self::dev_candidates() {
+            if seen.insert(e.manifest.name.clone()) {
+                self.found.push(e);
             }
         }
     }
@@ -362,6 +421,9 @@ impl PluginHost {
 mod tests {
     use super::*;
 
+    /// `current_dir` is process-wide; tests that chdir serialize on this.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn rescan_finds_manifest_and_exe() {
         let dir = std::env::temp_dir().join(format!("resq_host_scan_{}", std::process::id()));
@@ -376,6 +438,7 @@ mod tests {
         std::fs::write(&exe, b"not really an exe").expect("exe placeholder");
 
         // Point discovery at our temp layout.
+        let _g = CWD_LOCK.lock().unwrap();
         let saved = std::env::current_dir().unwrap();
         std::env::set_current_dir(&dir).expect("chdir");
         let host = PluginHost::new();
@@ -399,6 +462,39 @@ mod tests {
         let host2 = PluginHost::new();
         std::env::set_current_dir(&saved).expect("restore2");
         assert!(host2.found.iter().all(|f| f.manifest.name != "resq-noexe"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dev_discovery_finds_sibling_checkout() {
+        // Layout: <root>/resq-stub/{resq-plugin.toml,target/release/<exe>},
+        // cwd below <root> so ancestors() reaches it.
+        let dir = std::env::temp_dir().join(format!("resq_host_dev_{}", std::process::id()));
+        let pdir = dir.join("resq-stub");
+        std::fs::create_dir_all(pdir.join("target").join("release")).expect("mkdir");
+        std::fs::write(
+            pdir.join("resq-plugin.toml"),
+            "name = \"resq-stub\"\nversion = \"9.9\"\n",
+        )
+        .expect("manifest");
+        let exe = pdir
+            .join("target")
+            .join("release")
+            .join(format!("resq-stub{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&exe, b"stub").expect("exe");
+
+        let _g = CWD_LOCK.lock().unwrap();
+        let saved = std::env::current_dir().unwrap();
+        let deep = dir.join("deep");
+        std::fs::create_dir_all(&deep).expect("mkdir deep");
+        std::env::set_current_dir(&deep).expect("chdir");
+        let cands = PluginHost::dev_candidates();
+        std::env::set_current_dir(&saved).expect("restore");
+
+        let hit = cands.iter().find(|c| c.manifest.name == "resq-stub");
+        assert!(hit.is_some(), "no dev candidate in {cands:?}");
+        assert_eq!(hit.unwrap().manifest.version, "9.9");
 
         std::fs::remove_dir_all(&dir).ok();
     }

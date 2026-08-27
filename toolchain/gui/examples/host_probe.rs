@@ -21,12 +21,15 @@ fn main() {
     }
     let (plugins_dir, qvm) = (&args[0], &args[1]);
 
-    // The host scans `<cwd>/plugins`; the argument names that folder.
-    let root = std::path::Path::new(plugins_dir)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    std::env::set_current_dir(&root).expect("chdir plugins root");
+    // "." keeps the current cwd (real GUI dev scenario: run from
+    // toolchain/gui, plugins come from the sibling checkout).
+    if plugins_dir != "." {
+        let root = std::path::Path::new(plugins_dir)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        std::env::set_current_dir(&root).expect("chdir plugins root");
+    }
     let mut host = PluginHost::new();
     println!(
         "discovered {} plugin(s): {:?}",
