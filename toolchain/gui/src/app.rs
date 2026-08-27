@@ -377,6 +377,16 @@ pub struct App {
     logo: Option<egui::TextureHandle>,
     /// Last window title set (avoids per-frame ViewportCommand spam).
     title: Option<String>,
+    /// Plugin host: discovery + running plugin sessions.
+    plugins: crate::plugins::PluginHost,
+    /// Plugins window visibility.
+    show_plugins: bool,
+    /// Selected row of the discovered-plugin list.
+    plugin_sel: usize,
+    /// Selected tool of the selected running plugin.
+    tool_sel: usize,
+    /// Raw JSON arguments editor contents.
+    plugin_args: String,
 }
 
 impl App {
@@ -421,6 +431,11 @@ impl App {
             export_rx: None,
             logo: None,
             title: None,
+            plugins: crate::plugins::PluginHost::new(),
+            show_plugins: false,
+            plugin_sel: 0,
+            tool_sel: 0,
+            plugin_args: "{}".into(),
         };
         // Restore persisted settings; a CLI path overrides the stored one.
         if let Some(storage) = cc.storage {
@@ -750,6 +765,222 @@ impl eframe::App for App {
             }
         }
         self.hex_windows = still_open;
+
+        // Plugins window + non-blocking protocol polling.
+        for ev in self.plugins.poll() {
+            match ev {
+                crate::plugins::Ev::Tools(i, n) => {
+                    let name = self.plugins.running[i].name.clone();
+                    self.status = self.trf("plugin %N: %C tools", &[("N", &name), ("C", &n)]);
+                }
+                crate::plugins::Ev::ToolDone(i, text) => {
+                    let name = self.plugins.running[i].name.clone();
+                    let mut shown: String = text.chars().take(160).collect();
+                    if shown.len() < text.len() {
+                        shown.push('…');
+                    }
+                    self.status = format!("[{name}] {shown}");
+                }
+                crate::plugins::Ev::Log(_i, line) => {
+                    self.status = line;
+                }
+                crate::plugins::Ev::Exited(i) => {
+                    let name = self.plugins.running.get(i).map(|r| r.name.clone());
+                    if let Some(name) = name {
+                        self.status = self.trf("plugin exited: %N", &[("N", &name)]);
+                    }
+                }
+            }
+        }
+        if self.show_plugins {
+            let mut open = self.show_plugins;
+            let mut action: Option<PluginAction> = None;
+            let title = self.tr("Plugins");
+            egui::Window::new(title)
+                .id(egui::Id::new("plugins"))
+                .open(&mut open)
+                .default_width(680.0)
+                .default_height(480.0)
+                .show(ctx, |ui| {
+                    action = self.plugins_window(ui);
+                });
+            self.show_plugins = open;
+            if let Some(a) = action {
+                self.apply_plugin_action(a);
+            }
+        }
+    }
+}
+
+/// One user action collected inside the Plugins window, applied after it
+/// closes (the closure borrows self mutably; actions run outside).
+enum PluginAction {
+    Rescan,
+    Start(usize),
+    Stop(usize),
+    BadArgs(String),
+}
+
+impl App {
+    /// Draw the Plugins window contents; collect an action to apply.
+    fn plugins_window(&mut self, ui: &mut egui::Ui) -> Option<PluginAction> {
+        let mut action = None;
+        let rescan_label = self.tr("rescan");
+        let start_label = self.tr("start");
+        let stop_label = self.tr("stop");
+        let call_label = self.tr("Call tool");
+        let no_tools = self.tr("no tools (waiting for tools/list)");
+        let none_hint = self.tr("click a discovered plugin to start it");
+        let empty_hint = self.tr("no plugins found (plugins/<name>/resq-plugin.toml)");
+
+        ui.horizontal(|ui| {
+            ui.label(self.tr("plugins dir:"));
+            let dirs = self
+                .plugins
+                .dirs
+                .iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            ui.monospace(dirs);
+            if ui.button(rescan_label).clicked() {
+                action = Some(PluginAction::Rescan);
+            }
+        });
+        ui.separator();
+
+        // Discovered plugins.
+        egui::ScrollArea::vertical()
+            .id_salt("plugin_list")
+            .max_height(110.0)
+            .show(ui, |ui| {
+                if self.plugins.found.is_empty() {
+                    ui.weak(empty_hint);
+                }
+                for (i, p) in self.plugins.found.iter().enumerate() {
+                    let running = self
+                        .plugins
+                        .running
+                        .iter()
+                        .any(|r| r.name == p.manifest.name);
+                    ui.horizontal(|ui| {
+                        let label = format!(
+                            "{} v{} - {}{}",
+                            p.manifest.name,
+                            p.manifest.version,
+                            p.manifest.description,
+                            if running { "  [running]" } else { "" }
+                        );
+                        if ui.selectable_label(self.plugin_sel == i, label).clicked() {
+                            self.plugin_sel = i;
+                        }
+                        if !running && ui.small_button(start_label).clicked() {
+                            action = Some(PluginAction::Start(i));
+                        }
+                    });
+                }
+            });
+        ui.separator();
+
+        // Running session: tool picker + args + call + protocol log.
+        let Some(ri) = self.selected_running() else {
+            ui.weak(none_hint);
+            return action;
+        };
+        let (tool_count, requests, name, version) = {
+            let r = &self.plugins.running[ri];
+            (r.tools.len(), r.requests, r.name.clone(), r.version.clone())
+        };
+        self.tool_sel = self.tool_sel.min(tool_count.saturating_sub(1));
+        ui.horizontal(|ui| {
+            ui.label(format!("{name} v{version}"));
+            if ui.button(stop_label).clicked() {
+                action = Some(PluginAction::Stop(ri));
+            }
+            ui.weak(format!("{requests} requests"));
+        });
+        let sel_tool = self.tool_sel;
+        egui::ComboBox::from_id_salt("plugin_tool")
+            .selected_text(
+                self.plugins.running[ri]
+                    .tools
+                    .get(sel_tool)
+                    .map(|(n, _)| n.as_str())
+                    .unwrap_or(no_tools),
+            )
+            .show_ui(ui, |ui| {
+                for (ti, (name, desc)) in self.plugins.running[ri].tools.iter().enumerate() {
+                    ui.selectable_value(&mut self.tool_sel, ti, name)
+                        .on_hover_text(desc);
+                }
+            });
+        egui::TextEdit::multiline(&mut self.plugin_args)
+            .font(egui::TextStyle::Monospace)
+            .desired_rows(3)
+            .code_editor()
+            .show(ui);
+        if ui.button(call_label).clicked() {
+            let tool = self.plugins.running[ri]
+                .tools
+                .get(sel_tool)
+                .map(|(n, _)| n.clone());
+            if let Some(tool) = tool {
+                match serde_json::from_str::<serde_json::Value>(self.plugin_args.trim()) {
+                    Ok(args) => {
+                        if let Err(e) = self.plugins.call_tool(ri, &tool, args) {
+                            self.status = e;
+                        }
+                    }
+                    Err(e) => action = Some(PluginAction::BadArgs(e.to_string())),
+                }
+            }
+        }
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt("plugin_log")
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for line in &self.plugins.running[ri].log {
+                    ui.monospace(line.as_str());
+                }
+            });
+        action
+    }
+
+    fn selected_running(&self) -> Option<usize> {
+        // The running session matching the selected discovered plugin.
+        self.plugins.found.get(self.plugin_sel).and_then(|f| {
+            self.plugins
+                .running
+                .iter()
+                .position(|r| r.name == f.manifest.name)
+        })
+    }
+
+    fn apply_plugin_action(&mut self, a: PluginAction) {
+        match a {
+            PluginAction::Rescan => {
+                self.plugins.rescan();
+                let n = self.plugins.found.len();
+                self.status = self.trf("%N plugins found", &[("N", &n)]);
+            }
+            PluginAction::Start(i) => match self.plugins.start(i) {
+                Ok(_) => {
+                    let name = self.plugins.found[i].manifest.name.clone();
+                    self.status = self.trf("plugin started: %N", &[("N", &name)]);
+                }
+                Err(e) => self.status = e,
+            },
+            PluginAction::Stop(i) => {
+                let name = self.plugins.running[i].name.clone();
+                self.plugins.stop(i);
+                self.status = self.trf("plugin stopped: %N", &[("N", &name)]);
+            }
+            PluginAction::BadArgs(e) => {
+                self.status = format!("args JSON: {e}");
+            }
+        }
     }
 }
 
@@ -1144,6 +1375,15 @@ impl App {
 
                 // ---- Tools -----------------------------------------------
                 ui.menu_button(self.tr("Tools"), |ui| {
+                    if ui
+                        .button(self.tr("Plugins…"))
+                        .on_hover_text(self.tr("out-of-process plugin host (MCP tools)"))
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.show_plugins = true;
+                    }
+                    ui.separator();
                     if ui
                         .button(self.tr("Auto-name functions"))
                         .on_hover_text(self.tr("name vmMain + syscall wrapper thunks (heuristic)"))
