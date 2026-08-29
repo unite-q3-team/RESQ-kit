@@ -889,13 +889,22 @@ impl App {
             ui.weak(none_hint);
             return action;
         };
-        let (tool_count, requests, name, version) = {
+        let (tool_count, requests, name, version, protocol) = {
             let r = &self.plugins.running[ri];
-            (r.tools.len(), r.requests, r.name.clone(), r.version.clone())
+            (
+                r.tools.len(),
+                r.requests,
+                r.name.clone(),
+                r.version.clone(),
+                r.protocol.clone(),
+            )
         };
         self.tool_sel = self.tool_sel.min(tool_count.saturating_sub(1));
         ui.horizontal(|ui| {
             ui.label(format!("{name} v{version}"));
+            if !protocol.is_empty() {
+                ui.weak(format!("MCP {protocol}"));
+            }
             if ui.button(stop_label).clicked() {
                 action = Some(PluginAction::Stop(ri));
             }

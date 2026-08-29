@@ -22,6 +22,9 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 const LOG_CAP: usize = 500;
 /// Client identity reported in `initialize.clientInfo`.
 pub const CLIENT_INFO: (&str, &str) = ("resq-gui", env!("CARGO_PKG_VERSION"));
+/// MCP protocol version the host requests; the version actually negotiated
+/// is parsed from the `initialize` response into [`Running::protocol`].
+pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// A discovered (not necessarily running) plugin.
 #[derive(Debug, Clone)]
@@ -51,6 +54,9 @@ struct Pending {
 pub struct Running {
     pub name: String,
     pub version: String,
+    /// MCP protocol version negotiated in the `initialize` response
+    /// (empty until the handshake is answered).
+    pub protocol: String,
     child: Child,
     stdin: ChildStdin,
     rx: Receiver<Option<String>>,
@@ -139,6 +145,9 @@ impl Running {
         let id = v.get("id").and_then(Value::as_u64)?;
         let kind = self.pending.remove(&id)?;
         if let Some(err) = v.get("error") {
+            if self.init_id == Some(id) {
+                self.init_id = None;
+            }
             let msg = err
                 .get("message")
                 .and_then(Value::as_str)
@@ -165,6 +174,13 @@ impl Running {
             None => {
                 if self.init_id == Some(id) {
                     self.init_id = None;
+                    // The version the plugin actually picked (MCP lets the
+                    // server answer with a different supported version).
+                    self.protocol = result
+                        .get("protocolVersion")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
                     // MCP sequencing: notifications/initialized and further
                     // requests may go out only after the initialize response.
                     self.notify("notifications/initialized", &Value::Null);
@@ -371,6 +387,7 @@ impl PluginHost {
         let mut r = Running {
             name: entry.manifest.name.clone(),
             version: entry.manifest.version.clone(),
+            protocol: String::new(),
             child,
             stdin,
             rx,
@@ -385,7 +402,7 @@ impl PluginHost {
         // and `tools/list` go out once its response arrives (MCP sequencing),
         // see `Running::on_line`.
         let init = serde_json::json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": {},
             "clientInfo": { "name": CLIENT_INFO.0, "version": CLIENT_INFO.1 },
         });

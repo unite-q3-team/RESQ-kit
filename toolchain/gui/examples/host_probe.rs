@@ -63,7 +63,10 @@ fn main() {
         }
         for ev in host.poll() {
             if let Ev::Tools(i, n) = ev {
-                println!("[plugin {i}] tools/list -> {n} tools");
+                println!(
+                    "[plugin {i}] tools/list -> {n} tools (negotiated MCP {})",
+                    host.running[i].protocol
+                );
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
