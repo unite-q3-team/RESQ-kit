@@ -44,7 +44,6 @@ pub enum Ev {
 }
 
 struct Pending {
-    #[allow(dead_code)]
     tool: Option<String>,
 }
 
@@ -57,6 +56,9 @@ pub struct Running {
     rx: Receiver<Option<String>>,
     next_id: u64,
     pending: HashMap<u64, Pending>,
+    /// Request id of the outstanding MCP `initialize` (if any); the
+    /// initialized notification and `tools/list` wait for its response.
+    init_id: Option<u64>,
     /// Cached `tools/list` result (name, description).
     pub tools: Vec<(String, String)>,
     /// Protocol log (request/response lines, capped).
@@ -161,6 +163,13 @@ impl Running {
                 ))
             }
             None => {
+                if self.init_id == Some(id) {
+                    self.init_id = None;
+                    // MCP sequencing: notifications/initialized and further
+                    // requests may go out only after the initialize response.
+                    self.notify("notifications/initialized", &Value::Null);
+                    self.request("tools/list", &Value::Null, None);
+                }
                 if let Some(tools) = result.get("tools").and_then(Value::as_array) {
                     self.tools = tools
                         .iter()
@@ -341,7 +350,7 @@ impl PluginHost {
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let stdout = child.stdout.take().ok_or("no stdout")?;
         let (tx, rx) = mpsc::channel::<Option<String>>();
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name(format!("resq-plugin-{}", entry.manifest.name))
             .spawn(move || {
                 let rd = BufReader::new(stdout);
@@ -352,7 +361,12 @@ impl PluginHost {
                 }
                 let _ = tx.send(None);
             })
-            .map_err(|e| format!("spawn reader: {e}"))?;
+        {
+            // Reader thread failed to start: do not leak the child process.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("spawn reader: {e}"));
+        }
 
         let mut r = Running {
             name: entry.manifest.name.clone(),
@@ -362,20 +376,21 @@ impl PluginHost {
             rx,
             next_id: 0,
             pending: HashMap::new(),
+            init_id: None,
             tools: Vec::new(),
             log: VecDeque::new(),
             requests: 0,
         };
-        // MCP handshake: initialize, then the initialized notification,
-        // then fetch the tool table.
+        // MCP handshake: send `initialize` only. The initialized notification
+        // and `tools/list` go out once its response arrives (MCP sequencing),
+        // see `Running::on_line`.
         let init = serde_json::json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": { "name": CLIENT_INFO.0, "version": CLIENT_INFO.1 },
         });
-        r.request("initialize", &init, None);
-        r.notify("notifications/initialized", &Value::Null);
-        r.request("tools/list", &Value::Null, None);
+        let init_id = r.request("initialize", &init, None);
+        r.init_id = Some(init_id);
         self.running.push(r);
         Ok(self.running.len() - 1)
     }

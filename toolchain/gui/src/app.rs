@@ -770,16 +770,18 @@ impl eframe::App for App {
         for ev in self.plugins.poll() {
             match ev {
                 crate::plugins::Ev::Tools(i, n) => {
-                    let name = self.plugins.running[i].name.clone();
-                    self.status = self.trf("plugin %N: %C tools", &[("N", &name), ("C", &n)]);
+                    if let Some(r) = self.plugins.running.get(i) {
+                        self.status = self.trf("plugin %N: %C tools", &[("N", &r.name), ("C", &n)]);
+                    }
                 }
                 crate::plugins::Ev::ToolDone(i, text) => {
-                    let name = self.plugins.running[i].name.clone();
-                    let mut shown: String = text.chars().take(160).collect();
-                    if shown.len() < text.len() {
-                        shown.push('…');
+                    if let Some(r) = self.plugins.running.get(i) {
+                        let mut shown: String = text.chars().take(160).collect();
+                        if shown.len() < text.len() {
+                            shown.push('…');
+                        }
+                        self.status = format!("[{}] {shown}", r.name);
                     }
-                    self.status = format!("[{name}] {shown}");
                 }
                 crate::plugins::Ev::Log(_i, line) => {
                     self.status = line;
