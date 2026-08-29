@@ -2654,6 +2654,7 @@ dependencies = [
 [[package]]
 name = "resq-plugin-sdk"
 version = "0.1.0"
+source = "git+https://github.com/unite-q3-team/resq-plugin-sdk#52f364a34335742cf85180161266ff0255522706"
 dependencies = [
  "serde",
  "serde_json",

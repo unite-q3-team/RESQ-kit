@@ -96,7 +96,6 @@ File / View / Tools (экспорт: disasm `.txt`, identity C одной или
 ## Требования
 
 - Rust (`cargo`) — анализ, декомпиляция и пересборка кроссплатформенны
-- Для сборки `resq-gui` репозиторий `resq-plugin-sdk` должен быть соседним чекаутом (`../resq-plugin-sdk`)
 - Python 3
 - PowerShell (PowerShell 7 / `pwsh` на Linux) для скриптов-обёрток
 - Шаг пересборки (`q3lcc` + `q3asm`):

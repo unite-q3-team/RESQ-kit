@@ -97,8 +97,6 @@ reference plugin live in the `resq-plugin-sdk` / `resq-mcp` repos.
 ## Needs
 
 - Rust (`cargo`) — analysis, decompile and rebuild tooling is cross-platform
-- Building `resq-gui` expects the `resq-plugin-sdk` repo checked out as a
-  sibling (`../resq-plugin-sdk`)
 - Python 3
 - PowerShell (PowerShell 7 / `pwsh` on Linux) for the wrapper scripts
 - Rebuild step (`q3lcc` + `q3asm`):
